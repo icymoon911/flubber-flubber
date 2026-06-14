@@ -7,6 +7,7 @@ import {
 } from "./math.js";
 import normalizeRing from "./normalize.js";
 import { addPoints } from "./add.js";
+import { resolveEasing } from "./easing.js";
 
 export function fromCircle(x, y, radius, toShape, options) {
   return fromShape(
@@ -19,8 +20,14 @@ export function fromCircle(x, y, radius, toShape, options) {
 }
 
 export function toCircle(fromShape, x, y, radius, options) {
-  let interpolator = fromCircle(x, y, radius, fromShape, options);
-  return t => interpolator(1 - t);
+  var easingFn = resolveEasing(options && options.easing);
+  var innerOpts = stripEasing(options);
+  var interpolator = fromCircle(x, y, radius, fromShape, innerOpts);
+
+  if (!easingFn) {
+    return function(t) { return interpolator(1 - t); };
+  }
+  return function(t) { return interpolator(1 - easingFn(t)); };
 }
 
 export function fromRect(x, y, width, height, toShape, options) {
@@ -34,8 +41,25 @@ export function fromRect(x, y, width, height, toShape, options) {
 }
 
 export function toRect(fromShape, x, y, width, height, options) {
-  let interpolator = fromRect(x, y, width, height, fromShape, options);
-  return t => interpolator(1 - t);
+  var easingFn = resolveEasing(options && options.easing);
+  var innerOpts = stripEasing(options);
+  var interpolator = fromRect(x, y, width, height, fromShape, innerOpts);
+
+  if (!easingFn) {
+    return function(t) { return interpolator(1 - t); };
+  }
+  return function(t) { return interpolator(1 - easingFn(t)); };
+}
+
+function stripEasing(options) {
+  if (!options) return options;
+  var result = {};
+  for (var key in options) {
+    if (key !== "easing") {
+      result[key] = options[key];
+    }
+  }
+  return result;
 }
 
 function fromShape(
@@ -43,8 +67,10 @@ function fromShape(
   toShape,
   original,
   perimeter,
-  { maxSegmentLength = 10, string = true } = {}
+  { maxSegmentLength = 10, string = true, easing } = {}
 ) {
+  var easingFn = resolveEasing(easing);
+
   let toRing = normalizeRing(toShape, maxSegmentLength),
     fromRing,
     interpolator;
@@ -60,11 +86,23 @@ function fromShape(
   fromRing = fromFn(toRing);
   interpolator = interpolatePoints(fromRing, toRing, string);
 
+  var result;
   if (string) {
-    return t => (t < 1e-4 ? original : interpolator(t));
+    result = function(t) {
+      return t < 1e-4 ? original : interpolator(t);
+    };
+  } else {
+    result = interpolator;
   }
 
-  return interpolator;
+  if (easingFn) {
+    var base = result;
+    result = function(t) {
+      return base(easingFn(t));
+    };
+  }
+
+  return result;
 }
 
 export function circlePoints(x, y, radius) {

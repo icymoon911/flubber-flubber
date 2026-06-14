@@ -4,11 +4,12 @@ import normalizeRing from "./normalize.js";
 import triangulate from "./triangulate.js";
 import pieceOrder from "./order.js";
 import { INVALID_INPUT_ALL } from "./errors.js";
+import { resolveEasing } from "./easing.js";
 
 export function separate(
   fromShape,
   toShapes,
-  { maxSegmentLength = 10, string = true, single = false } = {}
+  { maxSegmentLength = 10, string = true, single = false, easing } = {}
 ) {
   let fromRing = normalizeRing(fromShape, maxSegmentLength);
 
@@ -30,29 +31,42 @@ export function separate(
     string,
     single,
     t0,
-    t1
+    t1,
+    easing
   });
 }
 
 export function combine(
   fromShapes,
   toShape,
-  { maxSegmentLength = 10, string = true, single = false } = {}
+  { maxSegmentLength = 10, string = true, single = false, easing } = {}
 ) {
+  var easingFn = resolveEasing(easing);
+
   let interpolators = separate(toShape, fromShapes, {
     maxSegmentLength,
     string,
     single
+    // intentionally no easing — we apply it on the outer level
   });
-  return single
-    ? t => interpolators(1 - t)
-    : interpolators.map(fn => t => fn(1 - t));
+
+  if (single) {
+    if (!easingFn) {
+      return function(t) { return interpolators(1 - t); };
+    }
+    return function(t) { return interpolators(1 - easingFn(t)); };
+  }
+
+  if (!easingFn) {
+    return interpolators.map(function(fn) { return function(t) { return fn(1 - t); }; });
+  }
+  return interpolators.map(function(fn) { return function(t) { return fn(1 - easingFn(t)); }; });
 }
 
 export function interpolateAll(
   fromShapes,
   toShapes,
-  { maxSegmentLength = 10, string = true, single = false } = {}
+  { maxSegmentLength = 10, string = true, single = false, easing } = {}
 ) {
   if (
     !Array.isArray(fromShapes) ||
@@ -86,15 +100,18 @@ export function interpolateAll(
     single,
     t0,
     t1,
-    match: false
+    match: false,
+    easing
   });
 }
 
 function interpolateSets(
   fromRings,
   toRings,
-  { string, single, t0, t1, match } = {}
+  { string, single, t0, t1, match, easing } = {}
 ) {
+  var easingFn = resolveEasing(easing);
+
   let order = match
       ? pieceOrder(fromRings, toRings)
       : fromRings.map((d, i) => i),
@@ -120,21 +137,44 @@ function interpolateSets(
       ? t => interpolators.map(fn => fn(t)).join(" ")
       : t => interpolators.map(fn => fn(t));
 
+    var result;
     if (string && (t0 || t1)) {
-      return t =>
-        (t < 1e-4 && t0) || (1 - t < 1e-4 && t1) || multiInterpolator(t);
+      result = t =>
+        (easingFn ? easingFn(t) : t) < 1e-4 && t0
+          ? t0
+          : (1 - (easingFn ? easingFn(t) : t) < 1e-4 && t1)
+            ? t1
+            : multiInterpolator(easingFn ? easingFn(t) : t);
+    } else {
+      result = multiInterpolator;
+      if (easingFn) {
+        var base = result;
+        result = t => base(easingFn(t));
+      }
     }
-    return multiInterpolator;
+    return result;
   } else if (string) {
     t0 = Array.isArray(t0) ? t0.map(d => typeof d === "string" && d) : [];
     t1 = Array.isArray(t1) ? t1.map(d => typeof d === "string" && d) : [];
 
     return interpolators.map((fn, i) => {
       if (t0[i] || t1[i]) {
-        return t => (t < 1e-4 && t0[i]) || (1 - t < 1e-4 && t1[i]) || fn(t);
+        var inner = fn;
+        var wrapped = t => {
+          var et = easingFn ? easingFn(t) : t;
+          return (et < 1e-4 && t0[i]) || (1 - et < 1e-4 && t1[i]) || inner(et);
+        };
+        return wrapped;
+      }
+      if (easingFn) {
+        return t => fn(easingFn(t));
       }
       return fn;
     });
+  }
+
+  if (easingFn) {
+    return interpolators.map(fn => t => fn(easingFn(t)));
   }
 
   return interpolators;

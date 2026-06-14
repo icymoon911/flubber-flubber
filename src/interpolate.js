@@ -2,13 +2,15 @@ import normalizeRing from "./normalize.js";
 import { addPoints } from "./add.js";
 import rotate from "./rotate.js";
 import { interpolatePoints } from "./math.js";
+import { resolveEasing } from "./easing.js";
 
 export default function(
   fromShape,
   toShape,
-  { maxSegmentLength = 10, string = true } = {}
+  { maxSegmentLength = 10, string = true, easing } = {}
 ) {
-  let fromRing = normalizeRing(fromShape, maxSegmentLength),
+  let easingFn = resolveEasing(easing),
+    fromRing = normalizeRing(fromShape, maxSegmentLength),
     toRing = normalizeRing(toShape, maxSegmentLength),
     interpolator = interpolateRing(fromRing, toRing, string);
 
@@ -17,17 +19,23 @@ export default function(
     !string ||
     (typeof fromShape !== "string" && typeof toShape !== "string")
   ) {
-    return interpolator;
+    if (!easingFn) {
+      return interpolator;
+    }
+    return function(t) {
+      return interpolator(easingFn(t));
+    };
   }
 
-  return t => {
-    if (t < 1e-4 && typeof fromShape === "string") {
+  return function(t) {
+    var et = easingFn ? easingFn(t) : t;
+    if (et < 1e-4 && typeof fromShape === "string") {
       return fromShape;
     }
-    if (1 - t < 1e-4 && typeof toShape === "string") {
+    if (1 - et < 1e-4 && typeof toShape === "string") {
       return toShape;
     }
-    return interpolator(t);
+    return interpolator(et);
   };
 }
 
