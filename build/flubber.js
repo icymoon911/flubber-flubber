@@ -126,6 +126,10 @@ function isCommand(code) {
   return false;
 }
 
+function isArc(code) {
+  return (code | 0x20) === 0x61;
+}
+
 function isDigit(code) {
   return (code >= 48 && code <= 57);   // 0..9
 }
@@ -153,6 +157,25 @@ function skipSpaces(state) {
   while (state.index < state.max && isSpace(state.path.charCodeAt(state.index))) {
     state.index++;
   }
+}
+
+
+function scanFlag(state) {
+  var ch = state.path.charCodeAt(state.index);
+
+  if (ch === 0x30/* 0 */) {
+    state.param = 0;
+    state.index++;
+    return;
+  }
+
+  if (ch === 0x31/* 1 */) {
+    state.param = 1;
+    state.index++;
+    return;
+  }
+
+  state.err = 'SvgPath: arc flag can be 0 or 1 only (at pos ' + state.index + ')';
 }
 
 
@@ -194,7 +217,7 @@ function scanParam(state) {
     if (zeroFirst && index < max) {
       // decimal number starts with '0' such as '09' is illegal.
       if (ch && isDigit(ch)) {
-        state.err = 'SvgPath: numbers started with `0` such as `09` are ilegal (at pos ' + start + ')';
+        state.err = 'SvgPath: numbers started with `0` such as `09` are illegal (at pos ' + start + ')';
         return;
       }
     }
@@ -279,10 +302,11 @@ function finalizeSegment(state) {
 
 function scanSegment(state) {
   var max = state.max,
-      cmdCode, comma_found, need_params, i;
+      cmdCode, is_arc, comma_found, need_params, i;
 
   state.segmentStart = state.index;
   cmdCode = state.path.charCodeAt(state.index);
+  is_arc = isArc(cmdCode);
 
   if (!isCommand(cmdCode)) {
     state.err = 'SvgPath: bad command ' + state.path[state.index] + ' (at pos ' + state.index + ')';
@@ -306,8 +330,11 @@ function scanSegment(state) {
 
   for (;;) {
     for (i = need_params; i > 0; i--) {
-      scanParam(state);
+      if (is_arc && (i === 3 || i === 4)) { scanFlag(state); }
+      else { scanParam(state); }
+
       if (state.err.length) {
+        finalizeSegment(state);
         return;
       }
       state.data.push(state.param);
@@ -357,11 +384,7 @@ var path_parse = function pathParse(svgPath) {
     scanSegment(state);
   }
 
-  if (state.err.length) {
-    state.result = [];
-
-  } else if (state.result.length) {
-
+  if (state.result.length) {
     if ('mM'.indexOf(state.result[0][0]) < 0) {
       state.err = 'SvgPath: string should start with `M` or `m`';
       state.result = [];
@@ -911,6 +934,26 @@ function SvgPath(path) {
   this.__stack    = [];
 }
 
+SvgPath.from = function (src) {
+  if (typeof src === 'string') { return new SvgPath(src); }
+
+  if (src instanceof SvgPath) {
+    // Create empty object
+    var s = new SvgPath('');
+
+    // Clone properies
+    s.err = src.err;
+    s.segments = src.segments.map(function (sgm) { return sgm.slice(); });
+    s.__stack = src.__stack.map(function (m) {
+      return matrix().matrix(m.toArray());
+    });
+
+    return s;
+  }
+
+  throw new Error('SvgPath.from: invalid param type ' + src);
+};
+
 
 SvgPath.prototype.__matrix = function (m) {
   var self = this, i;
@@ -1044,26 +1087,42 @@ SvgPath.prototype.__evaluateStack = function () {
 SvgPath.prototype.toString = function () {
   var this$1 = this;
 
-  var elements = [], skipCmd, cmd;
+  var result = '', prevCmd = '', cmdSkipped = false;
 
   this.__evaluateStack();
 
-  for (var i = 0; i < this.segments.length; i++) {
-    // remove repeating commands names
-    cmd = this$1.segments[i][0];
-    skipCmd = i > 0 && cmd !== 'm' && cmd !== 'M' && cmd === this$1.segments[i - 1][0];
-    elements = elements.concat(skipCmd ? this$1.segments[i].slice(1) : this$1.segments[i]);
+  for (var i = 0, len = this.segments.length; i < len; i++) {
+    var segment = this$1.segments[i];
+    var cmd = segment[0];
+
+    // Command not repeating => store
+    if (cmd !== prevCmd || cmd === 'm' || cmd === 'M') {
+      // workaround for FontForge SVG importing bug, keep space between "z m".
+      if (cmd === 'm' && prevCmd === 'z') { result += ' '; }
+      result += cmd;
+
+      cmdSkipped = false;
+    } else {
+      cmdSkipped = true;
+    }
+
+    // Store segment params
+    for (var pos = 1; pos < segment.length; pos++) {
+      var val = segment[pos];
+      // Space can be skipped
+      // 1. After command (always)
+      // 2. For negative value (with '-' at start)
+      if (pos === 1) {
+        if (cmdSkipped && val >= 0) { result += ' '; }
+      } else if (val >= 0) { result += ' '; }
+
+      result += val;
+    }
+
+    prevCmd = cmd;
   }
 
-  return elements.join(' ')
-    // Optimizations: remove spaces around commands & before `-`
-    //
-    // We could also remove leading zeros for `0.5`-like values,
-    // but their count is too small to spend time for.
-    .replace(/ ?([achlmqrstvz]) ?/gi, '$1')
-    .replace(/ \-/g, '-')
-    // workaround for FontForge SVG importing bug
-    .replace(/zm/g, 'z m');
+  return result;
 };
 
 
@@ -2445,11 +2504,12 @@ function exactRing(parsed) {
     } else if (command === "V") {
       ring.push([ring[ring.length - 1][0], x]);
     } else {
-      return false;
+      // Curve command encountered — keep already-parsed line segments if enough
+      return ring.length >= 3 ? { ring: ring } : false;
     }
   }
 
-  return ring.length ? { ring: ring } : false;
+  return ring.length >= 3 ? { ring: ring } : false;
 }
 
 function approximateRing(parsed, maxSegmentLength) {
@@ -2502,8 +2562,18 @@ function measure(d) {
 }
 
 function addPoints(ring, numPoints) {
+  var totalLength = polygonLength(ring);
+
+  // If zero-length ring (all points coincident), just clone existing points
+  if (!totalLength) {
+    for (var i$1 = 0; i$1 < numPoints; i$1++) {
+      ring.push(ring[i$1 % ring.length].slice(0));
+    }
+    return;
+  }
+
   var desiredLength = ring.length + numPoints,
-    step = polygonLength(ring) / numPoints;
+    step = totalLength / numPoints;
 
   var i = 0,
     cursor = 0,
@@ -2706,10 +2776,10 @@ function earcut(data, holeIndices, dim) {
 
         // minX, minY and invSize are later used to transform coords into integers for z-order calculation
         invSize = Math.max(maxX - minX, maxY - minY);
-        invSize = invSize !== 0 ? 1 / invSize : 0;
+        invSize = invSize !== 0 ? 32767 / invSize : 0;
     }
 
-    earcutLinked(outerNode, triangles, dim, minX, minY, invSize);
+    earcutLinked(outerNode, triangles, dim, minX, minY, invSize, 0);
 
     return triangles;
 }
@@ -2773,9 +2843,9 @@ function earcutLinked(ear, triangles, dim, minX, minY, invSize, pass) {
 
         if (invSize ? isEarHashed(ear, minX, minY, invSize) : isEar(ear)) {
             // cut off the triangle
-            triangles.push(prev.i / dim);
-            triangles.push(ear.i / dim);
-            triangles.push(next.i / dim);
+            triangles.push(prev.i / dim | 0);
+            triangles.push(ear.i / dim | 0);
+            triangles.push(next.i / dim | 0);
 
             removeNode(ear);
 
@@ -2818,10 +2888,18 @@ function isEar(ear) {
     if (area(a, b, c) >= 0) { return false; } // reflex, can't be an ear
 
     // now make sure we don't have other points inside the potential ear
-    var p = ear.next.next;
+    var ax = a.x, bx = b.x, cx = c.x, ay = a.y, by = b.y, cy = c.y;
 
-    while (p !== ear.prev) {
-        if (pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y) &&
+    // triangle bbox; min & max are calculated like this for speed
+    var x0 = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx),
+        y0 = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy),
+        x1 = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx),
+        y1 = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
+
+    var p = c.next;
+    while (p !== a) {
+        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, p.x, p.y) &&
             area(p.prev, p, p.next) >= 0) { return false; }
         p = p.next;
     }
@@ -2836,45 +2914,43 @@ function isEarHashed(ear, minX, minY, invSize) {
 
     if (area(a, b, c) >= 0) { return false; } // reflex, can't be an ear
 
+    var ax = a.x, bx = b.x, cx = c.x, ay = a.y, by = b.y, cy = c.y;
+
     // triangle bbox; min & max are calculated like this for speed
-    var minTX = a.x < b.x ? (a.x < c.x ? a.x : c.x) : (b.x < c.x ? b.x : c.x),
-        minTY = a.y < b.y ? (a.y < c.y ? a.y : c.y) : (b.y < c.y ? b.y : c.y),
-        maxTX = a.x > b.x ? (a.x > c.x ? a.x : c.x) : (b.x > c.x ? b.x : c.x),
-        maxTY = a.y > b.y ? (a.y > c.y ? a.y : c.y) : (b.y > c.y ? b.y : c.y);
+    var x0 = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx),
+        y0 = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy),
+        x1 = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx),
+        y1 = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
 
     // z-order range for the current triangle bbox;
-    var minZ = zOrder(minTX, minTY, minX, minY, invSize),
-        maxZ = zOrder(maxTX, maxTY, minX, minY, invSize);
+    var minZ = zOrder(x0, y0, minX, minY, invSize),
+        maxZ = zOrder(x1, y1, minX, minY, invSize);
 
     var p = ear.prevZ,
         n = ear.nextZ;
 
     // look for points inside the triangle in both directions
     while (p && p.z >= minZ && n && n.z <= maxZ) {
-        if (p !== ear.prev && p !== ear.next &&
-            pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y) &&
-            area(p.prev, p, p.next) >= 0) { return false; }
+        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 && p !== a && p !== c &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, p.x, p.y) && area(p.prev, p, p.next) >= 0) { return false; }
         p = p.prevZ;
 
-        if (n !== ear.prev && n !== ear.next &&
-            pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, n.x, n.y) &&
-            area(n.prev, n, n.next) >= 0) { return false; }
+        if (n.x >= x0 && n.x <= x1 && n.y >= y0 && n.y <= y1 && n !== a && n !== c &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, n.x, n.y) && area(n.prev, n, n.next) >= 0) { return false; }
         n = n.nextZ;
     }
 
     // look for remaining points in decreasing z-order
     while (p && p.z >= minZ) {
-        if (p !== ear.prev && p !== ear.next &&
-            pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y) &&
-            area(p.prev, p, p.next) >= 0) { return false; }
+        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 && p !== a && p !== c &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, p.x, p.y) && area(p.prev, p, p.next) >= 0) { return false; }
         p = p.prevZ;
     }
 
     // look for remaining points in increasing z-order
     while (n && n.z <= maxZ) {
-        if (n !== ear.prev && n !== ear.next &&
-            pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, n.x, n.y) &&
-            area(n.prev, n, n.next) >= 0) { return false; }
+        if (n.x >= x0 && n.x <= x1 && n.y >= y0 && n.y <= y1 && n !== a && n !== c &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, n.x, n.y) && area(n.prev, n, n.next) >= 0) { return false; }
         n = n.nextZ;
     }
 
@@ -2890,9 +2966,9 @@ function cureLocalIntersections(start, triangles, dim) {
 
         if (!equals(a, b) && intersects(a, p, p.next, b) && locallyInside(a, b) && locallyInside(b, a)) {
 
-            triangles.push(a.i / dim);
-            triangles.push(p.i / dim);
-            triangles.push(b.i / dim);
+            triangles.push(a.i / dim | 0);
+            triangles.push(p.i / dim | 0);
+            triangles.push(b.i / dim | 0);
 
             // remove two nodes involved
             removeNode(p);
@@ -2922,8 +2998,8 @@ function splitEarcut(start, triangles, dim, minX, minY, invSize) {
                 c = filterPoints(c, c.next);
 
                 // run earcut on each half
-                earcutLinked(a, triangles, dim, minX, minY, invSize);
-                earcutLinked(c, triangles, dim, minX, minY, invSize);
+                earcutLinked(a, triangles, dim, minX, minY, invSize, 0);
+                earcutLinked(c, triangles, dim, minX, minY, invSize, 0);
                 return;
             }
             b = b.next;
@@ -2949,8 +3025,7 @@ function eliminateHoles(data, holeIndices, outerNode, dim) {
 
     // process holes from left to right
     for (i = 0; i < queue.length; i++) {
-        eliminateHole(queue[i], outerNode);
-        outerNode = filterPoints(outerNode, outerNode.next);
+        outerNode = eliminateHole(queue[i], outerNode);
     }
 
     return outerNode;
@@ -2962,11 +3037,16 @@ function compareX(a, b) {
 
 // find a bridge between vertices that connects hole with an outer ring and and link it
 function eliminateHole(hole, outerNode) {
-    outerNode = findHoleBridge(hole, outerNode);
-    if (outerNode) {
-        var b = splitPolygon(outerNode, hole);
-        filterPoints(b, b.next);
+    var bridge = findHoleBridge(hole, outerNode);
+    if (!bridge) {
+        return outerNode;
     }
+
+    var bridgeReverse = splitPolygon(bridge, hole);
+
+    // filter collinear points around the cuts
+    filterPoints(bridgeReverse, bridgeReverse.next);
+    return filterPoints(bridge, bridge.next);
 }
 
 // David Eberly's algorithm for finding a bridge between hole and outer polygon
@@ -2984,19 +3064,14 @@ function findHoleBridge(hole, outerNode) {
             var x = p.x + (hy - p.y) * (p.next.x - p.x) / (p.next.y - p.y);
             if (x <= hx && x > qx) {
                 qx = x;
-                if (x === hx) {
-                    if (hy === p.y) { return p; }
-                    if (hy === p.next.y) { return p.next; }
-                }
                 m = p.x < p.next.x ? p : p.next;
+                if (x === hx) { return m; } // hole touches outer segment; pick leftmost endpoint
             }
         }
         p = p.next;
     } while (p !== outerNode);
 
     if (!m) { return null; }
-
-    if (hx === qx) { return m; } // hole touches outer segment; pick leftmost endpoint
 
     // look for points inside the triangle of hole point, segment intersection and endpoint;
     // if there are no points found, we have a valid connection;
@@ -3038,7 +3113,7 @@ function sectorContainsSector(m, p) {
 function indexCurve(start, minX, minY, invSize) {
     var p = start;
     do {
-        if (p.z === null) { p.z = zOrder(p.x, p.y, minX, minY, invSize); }
+        if (p.z === 0) { p.z = zOrder(p.x, p.y, minX, minY, invSize); }
         p.prevZ = p.prev;
         p.nextZ = p.next;
         p = p.next;
@@ -3106,8 +3181,8 @@ function sortLinked(list) {
 // z-order of a point given coords and inverse of the longer side of data bbox
 function zOrder(x, y, minX, minY, invSize) {
     // coords are transformed into non-negative 15-bit integer range
-    x = 32767 * (x - minX) * invSize;
-    y = 32767 * (y - minY) * invSize;
+    x = (x - minX) * invSize | 0;
+    y = (y - minY) * invSize | 0;
 
     x = (x | (x << 8)) & 0x00FF00FF;
     x = (x | (x << 4)) & 0x0F0F0F0F;
@@ -3136,9 +3211,9 @@ function getLeftmost(start) {
 
 // check if a point lies within a convex triangle
 function pointInTriangle(ax, ay, bx, by, cx, cy, px, py) {
-    return (cx - px) * (ay - py) - (ax - px) * (cy - py) >= 0 &&
-           (ax - px) * (by - py) - (bx - px) * (ay - py) >= 0 &&
-           (bx - px) * (cy - py) - (cx - px) * (by - py) >= 0;
+    return (cx - px) * (ay - py) >= (ax - px) * (cy - py) &&
+           (ax - px) * (by - py) >= (bx - px) * (ay - py) &&
+           (bx - px) * (cy - py) >= (cx - px) * (by - py);
 }
 
 // check if a diagonal between two polygon nodes is valid (lies in polygon interior)
@@ -3281,7 +3356,7 @@ function Node(i, x, y) {
     this.next = null;
 
     // z-order curve value
-    this.z = null;
+    this.z = 0;
 
     // previous and next nodes in z-order
     this.prevZ = null;
@@ -3377,6 +3452,7 @@ var reverse = function(array, n) {
 };
 
 var feature = function(topology, o) {
+  if (typeof o === "string") { o = topology.objects[o]; }
   return o.type === "GeometryCollection"
       ? {type: "FeatureCollection", features: o.geometries.map(function(o) { return feature$1(topology, o); })}
       : feature$1(topology, o);
@@ -3909,11 +3985,8 @@ function collapseTopology(topology, numPieces) {
     mergeSmallestFeature();
   }
 
-  if (numPieces > geometries.length) {
-    throw new RangeError(
-      "Can't collapse topology into " + numPieces + " pieces."
-    );
-  }
+  // Gracefully return whatever we have if triangles < numPieces
+  // (instead of throwing RangeError)
 
   return feature(topology, topology.objects.triangles).features.map(function (f) {
     f.geometry.coordinates[0].pop();
@@ -4015,6 +4088,26 @@ function separate(
   var maxSegmentLength = ref.maxSegmentLength; if ( maxSegmentLength === void 0 ) maxSegmentLength = 10;
   var string = ref.string; if ( string === void 0 ) string = true;
   var single = ref.single; if ( single === void 0 ) single = false;
+
+  // Validate toShapes input
+  if (!Array.isArray(toShapes) || !toShapes.length) {
+    throw new TypeError(
+      "separate() requires a non-empty array of target shapes."
+    );
+  }
+
+  toShapes.forEach(function(shape, i) {
+    if (shape == null) {
+      throw new TypeError(
+        "separate() target shape at index " + i + " is null or undefined."
+      );
+    }
+    if (Array.isArray(shape) && shape.length === 0) {
+      throw new TypeError(
+        "separate() target shape at index " + i + " is an empty array."
+      );
+    }
+  });
 
   var fromRing = normalizeRing(fromShape, maxSegmentLength);
 
@@ -4247,7 +4340,6 @@ function circlePoints(x, y, radius) {
   };
 }
 
-// TODO splice in exact corners?
 function rectPoints(x, y, width, height) {
   return function(ring) {
     var centroid = polygonCentroid$$1(ring),
@@ -4264,34 +4356,83 @@ function rectPoints(x, y, width, height) {
 
     var startingProgress = startingAngle / (2 * Math.PI);
 
-    return ring.map(function (point, i) {
+    // Perimeter-based proportions so each side gets its fair share
+    var rectPerimeter = 2 * width + 2 * height,
+      hFrac = height / rectPerimeter,
+      wFrac = width / rectPerimeter;
+
+    // Corner progress values (starting from right-middle, going CW in screen coords)
+    // p1 = bottom-right, p2 = bottom-left, p3 = top-left, p4 = top-right
+    var p1 = 0.5 * hFrac,
+      p2 = p1 + wFrac,
+      p3 = p2 + hFrac,
+      p4 = p3 + wFrac;
+
+    var cornerData = [
+      { p: p1, coords: [x + width, y + height] },
+      { p: p2, coords: [x, y + height] },
+      { p: p3, coords: [x, y] },
+      { p: p4, coords: [x + width, y] }
+    ];
+
+    // Build entries: ring points + corners, each with their progress
+    var entries = [];
+
+    ring.forEach(function(point, i) {
       if (i) {
         along += distance(point, ring[i - 1]);
       }
-      var relative = rectPoint(
-        (startingProgress + (perimeter ? along / perimeter : i / ring.length)) %
-          1
-      );
-      return [x + relative[0] * width, y + relative[1] * height];
+      var progress =
+        (startingProgress +
+          (perimeter ? along / perimeter : i / ring.length)) %
+        1;
+      entries.push({ progress: progress, type: "ring" });
+    });
+
+    // Splice in exact corners
+    cornerData.forEach(function(c) {
+      entries.push({ progress: c.p, type: "corner", coords: c.coords });
+    });
+
+    // Sort by progress
+    entries.sort(function(a, b) {
+      return a.progress - b.progress;
+    });
+
+    // Map each entry to its rect position
+    return entries.map(function(entry) {
+      if (entry.type === "corner") {
+        return entry.coords;
+      }
+      return mapToRect(entry.progress, x, y, width, height, p1, p2, p3, p4, hFrac, wFrac);
     });
   };
 }
 
-// TODO don't do this
-function rectPoint(progress) {
-  if (progress <= 1 / 8) {
-    return [1, 0.5 + progress * 4];
+function mapToRect(progress, x, y, width, height, p1, p2, p3, p4, hFrac, wFrac) {
+  // Lower half of right edge: 0 to p1
+  if (progress <= p1) {
+    var t = progress / p1;
+    return [x + width, y + height * (0.5 + t * 0.5)];
   }
-  if (progress <= 3 / 8) {
-    return [1.5 - 4 * progress, 1];
+  // Bottom edge: p1 to p2
+  if (progress <= p2) {
+    var t = (progress - p1) / wFrac;
+    return [x + width * (1 - t), y + height];
   }
-  if (progress <= 5 / 8) {
-    return [0, 2.5 - 4 * progress];
+  // Left edge: p2 to p3
+  if (progress <= p3) {
+    var t = (progress - p2) / hFrac;
+    return [x, y + height * (1 - t)];
   }
-  if (progress <= 7 / 8) {
-    return [4 * progress - 2.5, 0];
+  // Top edge: p3 to p4
+  if (progress <= p4) {
+    var t = (progress - p3) / wFrac;
+    return [x + width * t, y];
   }
-  return [1, 4 * progress - 3.5];
+  // Upper half of right edge: p4 to 1
+  var t = (progress - p4) / (0.5 * hFrac);
+  return [x + width, y + height * t * 0.5];
 }
 
 function circlePath(x, y, radius) {

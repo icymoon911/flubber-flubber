@@ -90,7 +90,6 @@ export function circlePoints(x, y, radius) {
   };
 }
 
-// TODO splice in exact corners?
 export function rectPoints(x, y, width, height) {
   return function(ring) {
     let centroid = polygonCentroid(ring),
@@ -107,34 +106,83 @@ export function rectPoints(x, y, width, height) {
 
     let startingProgress = startingAngle / (2 * Math.PI);
 
-    return ring.map((point, i) => {
+    // Perimeter-based proportions so each side gets its fair share
+    let rectPerimeter = 2 * width + 2 * height,
+      hFrac = height / rectPerimeter,
+      wFrac = width / rectPerimeter;
+
+    // Corner progress values (starting from right-middle, going CW in screen coords)
+    // p1 = bottom-right, p2 = bottom-left, p3 = top-left, p4 = top-right
+    let p1 = 0.5 * hFrac,
+      p2 = p1 + wFrac,
+      p3 = p2 + hFrac,
+      p4 = p3 + wFrac;
+
+    let cornerData = [
+      { p: p1, coords: [x + width, y + height] },
+      { p: p2, coords: [x, y + height] },
+      { p: p3, coords: [x, y] },
+      { p: p4, coords: [x + width, y] }
+    ];
+
+    // Build entries: ring points + corners, each with their progress
+    let entries = [];
+
+    ring.forEach(function(point, i) {
       if (i) {
         along += distance(point, ring[i - 1]);
       }
-      let relative = rectPoint(
-        (startingProgress + (perimeter ? along / perimeter : i / ring.length)) %
-          1
-      );
-      return [x + relative[0] * width, y + relative[1] * height];
+      let progress =
+        (startingProgress +
+          (perimeter ? along / perimeter : i / ring.length)) %
+        1;
+      entries.push({ progress: progress, type: "ring" });
+    });
+
+    // Splice in exact corners
+    cornerData.forEach(function(c) {
+      entries.push({ progress: c.p, type: "corner", coords: c.coords });
+    });
+
+    // Sort by progress
+    entries.sort(function(a, b) {
+      return a.progress - b.progress;
+    });
+
+    // Map each entry to its rect position
+    return entries.map(function(entry) {
+      if (entry.type === "corner") {
+        return entry.coords;
+      }
+      return mapToRect(entry.progress, x, y, width, height, p1, p2, p3, p4, hFrac, wFrac);
     });
   };
 }
 
-// TODO don't do this
-function rectPoint(progress) {
-  if (progress <= 1 / 8) {
-    return [1, 0.5 + progress * 4];
+function mapToRect(progress, x, y, width, height, p1, p2, p3, p4, hFrac, wFrac) {
+  // Lower half of right edge: 0 to p1
+  if (progress <= p1) {
+    var t = progress / p1;
+    return [x + width, y + height * (0.5 + t * 0.5)];
   }
-  if (progress <= 3 / 8) {
-    return [1.5 - 4 * progress, 1];
+  // Bottom edge: p1 to p2
+  if (progress <= p2) {
+    var t = (progress - p1) / wFrac;
+    return [x + width * (1 - t), y + height];
   }
-  if (progress <= 5 / 8) {
-    return [0, 2.5 - 4 * progress];
+  // Left edge: p2 to p3
+  if (progress <= p3) {
+    var t = (progress - p2) / hFrac;
+    return [x, y + height * (1 - t)];
   }
-  if (progress <= 7 / 8) {
-    return [4 * progress - 2.5, 0];
+  // Top edge: p3 to p4
+  if (progress <= p4) {
+    var t = (progress - p3) / wFrac;
+    return [x + width * t, y];
   }
-  return [1, 4 * progress - 3.5];
+  // Upper half of right edge: p4 to 1
+  var t = (progress - p4) / (0.5 * hFrac);
+  return [x + width, y + height * t * 0.5];
 }
 
 export function circlePath(x, y, radius) {

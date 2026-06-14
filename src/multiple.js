@@ -10,6 +10,26 @@ export function separate(
   toShapes,
   { maxSegmentLength = 10, string = true, single = false } = {}
 ) {
+  // Validate toShapes input
+  if (!Array.isArray(toShapes) || !toShapes.length) {
+    throw new TypeError(
+      "separate() requires a non-empty array of target shapes."
+    );
+  }
+
+  toShapes.forEach(function(shape, i) {
+    if (shape == null) {
+      throw new TypeError(
+        "separate() target shape at index " + i + " is null or undefined."
+      );
+    }
+    if (Array.isArray(shape) && shape.length === 0) {
+      throw new TypeError(
+        "separate() target shape at index " + i + " is an empty array."
+      );
+    }
+  });
+
   let fromRing = normalizeRing(fromShape, maxSegmentLength);
 
   if (fromRing.length < toShapes.length + 2) {

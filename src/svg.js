@@ -51,11 +51,12 @@ function exactRing(parsed) {
     } else if (command === "V") {
       ring.push([ring[ring.length - 1][0], x]);
     } else {
-      return false;
+      // Curve command encountered — keep already-parsed line segments if enough
+      return ring.length >= 3 ? { ring } : false;
     }
   }
 
-  return ring.length ? { ring } : false;
+  return ring.length >= 3 ? { ring } : false;
 }
 
 function approximateRing(parsed, maxSegmentLength) {
