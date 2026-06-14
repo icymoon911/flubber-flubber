@@ -7,6 +7,8 @@ import {
 } from "./math.js";
 import normalizeRing from "./normalize.js";
 import { addPoints } from "./add.js";
+import { parseOptions } from "./options.js";
+import { endpointOptimize } from "./endpoint.js";
 
 export function fromCircle(x, y, radius, toShape, options) {
   return fromShape(
@@ -19,8 +21,8 @@ export function fromCircle(x, y, radius, toShape, options) {
 }
 
 export function toCircle(fromShape, x, y, radius, options) {
-  let interpolator = fromCircle(x, y, radius, fromShape, options);
-  return t => interpolator(1 - t);
+  var interpolator = fromCircle(x, y, radius, fromShape, options);
+  return function(t) { return interpolator(1 - t); };
 }
 
 export function fromRect(x, y, width, height, toShape, options) {
@@ -34,57 +36,54 @@ export function fromRect(x, y, width, height, toShape, options) {
 }
 
 export function toRect(fromShape, x, y, width, height, options) {
-  let interpolator = fromRect(x, y, width, height, fromShape, options);
-  return t => interpolator(1 - t);
+  var interpolator = fromRect(x, y, width, height, fromShape, options);
+  return function(t) { return interpolator(1 - t); };
 }
 
-function fromShape(
-  fromFn,
-  toShape,
-  original,
-  perimeter,
-  { maxSegmentLength = 10, string = true } = {}
-) {
-  let toRing = normalizeRing(toShape, maxSegmentLength),
+function fromShape(fromFn, toShape, original, perimeter, options) {
+  var opts = parseOptions(options);
+  var toRing = normalizeRing(toShape, opts.maxSegmentLength),
     fromRing,
     interpolator;
 
   // Enforce maxSegmentLength on circle/rect perimeter too
   if (
     isFiniteNumber(perimeter) &&
-    toRing.length < perimeter / maxSegmentLength
+    toRing.length < perimeter / opts.maxSegmentLength
   ) {
-    addPoints(toRing, Math.ceil(perimeter / maxSegmentLength - toRing.length));
+    addPoints(toRing, Math.ceil(perimeter / opts.maxSegmentLength - toRing.length));
   }
 
   fromRing = fromFn(toRing);
-  interpolator = interpolatePoints(fromRing, toRing, string);
+  interpolator = interpolatePoints(fromRing, toRing, opts.string);
 
-  if (string) {
-    return t => (t < 1e-4 ? original : interpolator(t));
-  }
+  return endpointOptimize(interpolator, opts.string ? original : null, null);
+}
 
-  return interpolator;
+// Shared framework: walk along the ring's perimeter, computing progress [0..1)
+// and the starting angle from centroid, then delegate to mapFn for each point.
+function mapAlongPerimeter(ring, mapFn) {
+  var centroid = polygonCentroid(ring),
+    perimeter = polygonLength([...ring, ring[0]]),
+    startingAngle = Math.atan2(
+      ring[0][1] - centroid[1],
+      ring[0][0] - centroid[0]
+    ),
+    along = 0;
+
+  return ring.map(function(point, i) {
+    if (i) {
+      along += distance(point, ring[i - 1]);
+    }
+    var progress = perimeter ? along / perimeter : i / ring.length;
+    return mapFn(progress, startingAngle);
+  });
 }
 
 export function circlePoints(x, y, radius) {
   return function(ring) {
-    let centroid = polygonCentroid(ring),
-      perimeter = polygonLength([...ring, ring[0]]),
-      startingAngle = Math.atan2(
-        ring[0][1] - centroid[1],
-        ring[0][0] - centroid[0]
-      ),
-      along = 0;
-
-    return ring.map((point, i) => {
-      let angle;
-      if (i) {
-        along += distance(point, ring[i - 1]);
-      }
-      angle =
-        startingAngle +
-        2 * Math.PI * (perimeter ? along / perimeter : i / ring.length);
+    return mapAlongPerimeter(ring, function(progress, startingAngle) {
+      var angle = startingAngle + 2 * Math.PI * progress;
       return [Math.cos(angle) * radius + x, Math.sin(angle) * radius + y];
     });
   };
@@ -93,28 +92,10 @@ export function circlePoints(x, y, radius) {
 // TODO splice in exact corners?
 export function rectPoints(x, y, width, height) {
   return function(ring) {
-    let centroid = polygonCentroid(ring),
-      perimeter = polygonLength([...ring, ring[0]]),
-      startingAngle = Math.atan2(
-        ring[0][1] - centroid[1],
-        ring[0][0] - centroid[0]
-      ),
-      along = 0;
-
-    if (startingAngle < 0) {
-      startingAngle = 2 * Math.PI + startingAngle;
-    }
-
-    let startingProgress = startingAngle / (2 * Math.PI);
-
-    return ring.map((point, i) => {
-      if (i) {
-        along += distance(point, ring[i - 1]);
-      }
-      let relative = rectPoint(
-        (startingProgress + (perimeter ? along / perimeter : i / ring.length)) %
-          1
-      );
+    return mapAlongPerimeter(ring, function(progress, startingAngle) {
+      var sa = startingAngle < 0 ? 2 * Math.PI + startingAngle : startingAngle;
+      var startingProgress = sa / (2 * Math.PI);
+      var relative = rectPoint((startingProgress + progress) % 1);
       return [x + relative[0] * width, y + relative[1] * height];
     });
   };
@@ -138,7 +119,7 @@ function rectPoint(progress) {
 }
 
 export function circlePath(x, y, radius) {
-  let l = x - radius + "," + y,
+  var l = x - radius + "," + y,
     r = x + radius + "," + y,
     pre = "A" + radius + "," + radius + ",0,1,1,";
 
@@ -146,7 +127,7 @@ export function circlePath(x, y, radius) {
 }
 
 export function rectPath(x, y, width, height) {
-  let r = x + width,
+  var r = x + width,
     b = y + height;
   return (
     "M" +

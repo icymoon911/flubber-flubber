@@ -126,6 +126,10 @@ function isCommand(code) {
   return false;
 }
 
+function isArc(code) {
+  return (code | 0x20) === 0x61;
+}
+
 function isDigit(code) {
   return (code >= 48 && code <= 57);   // 0..9
 }
@@ -153,6 +157,25 @@ function skipSpaces(state) {
   while (state.index < state.max && isSpace(state.path.charCodeAt(state.index))) {
     state.index++;
   }
+}
+
+
+function scanFlag(state) {
+  var ch = state.path.charCodeAt(state.index);
+
+  if (ch === 0x30/* 0 */) {
+    state.param = 0;
+    state.index++;
+    return;
+  }
+
+  if (ch === 0x31/* 1 */) {
+    state.param = 1;
+    state.index++;
+    return;
+  }
+
+  state.err = 'SvgPath: arc flag can be 0 or 1 only (at pos ' + state.index + ')';
 }
 
 
@@ -194,7 +217,7 @@ function scanParam(state) {
     if (zeroFirst && index < max) {
       // decimal number starts with '0' such as '09' is illegal.
       if (ch && isDigit(ch)) {
-        state.err = 'SvgPath: numbers started with `0` such as `09` are ilegal (at pos ' + start + ')';
+        state.err = 'SvgPath: numbers started with `0` such as `09` are illegal (at pos ' + start + ')';
         return;
       }
     }
@@ -279,10 +302,11 @@ function finalizeSegment(state) {
 
 function scanSegment(state) {
   var max = state.max,
-      cmdCode, comma_found, need_params, i;
+      cmdCode, is_arc, comma_found, need_params, i;
 
   state.segmentStart = state.index;
   cmdCode = state.path.charCodeAt(state.index);
+  is_arc = isArc(cmdCode);
 
   if (!isCommand(cmdCode)) {
     state.err = 'SvgPath: bad command ' + state.path[state.index] + ' (at pos ' + state.index + ')';
@@ -306,8 +330,11 @@ function scanSegment(state) {
 
   for (;;) {
     for (i = need_params; i > 0; i--) {
-      scanParam(state);
+      if (is_arc && (i === 3 || i === 4)) { scanFlag(state); }
+      else { scanParam(state); }
+
       if (state.err.length) {
+        finalizeSegment(state);
         return;
       }
       state.data.push(state.param);
@@ -357,11 +384,7 @@ var path_parse = function pathParse(svgPath) {
     scanSegment(state);
   }
 
-  if (state.err.length) {
-    state.result = [];
-
-  } else if (state.result.length) {
-
+  if (state.result.length) {
     if ('mM'.indexOf(state.result[0][0]) < 0) {
       state.err = 'SvgPath: string should start with `M` or `m`';
       state.result = [];
@@ -911,6 +934,26 @@ function SvgPath(path) {
   this.__stack    = [];
 }
 
+SvgPath.from = function (src) {
+  if (typeof src === 'string') { return new SvgPath(src); }
+
+  if (src instanceof SvgPath) {
+    // Create empty object
+    var s = new SvgPath('');
+
+    // Clone properies
+    s.err = src.err;
+    s.segments = src.segments.map(function (sgm) { return sgm.slice(); });
+    s.__stack = src.__stack.map(function (m) {
+      return matrix().matrix(m.toArray());
+    });
+
+    return s;
+  }
+
+  throw new Error('SvgPath.from: invalid param type ' + src);
+};
+
 
 SvgPath.prototype.__matrix = function (m) {
   var self = this, i;
@@ -1044,26 +1087,42 @@ SvgPath.prototype.__evaluateStack = function () {
 SvgPath.prototype.toString = function () {
   var this$1 = this;
 
-  var elements = [], skipCmd, cmd;
+  var result = '', prevCmd = '', cmdSkipped = false;
 
   this.__evaluateStack();
 
-  for (var i = 0; i < this.segments.length; i++) {
-    // remove repeating commands names
-    cmd = this$1.segments[i][0];
-    skipCmd = i > 0 && cmd !== 'm' && cmd !== 'M' && cmd === this$1.segments[i - 1][0];
-    elements = elements.concat(skipCmd ? this$1.segments[i].slice(1) : this$1.segments[i]);
+  for (var i = 0, len = this.segments.length; i < len; i++) {
+    var segment = this$1.segments[i];
+    var cmd = segment[0];
+
+    // Command not repeating => store
+    if (cmd !== prevCmd || cmd === 'm' || cmd === 'M') {
+      // workaround for FontForge SVG importing bug, keep space between "z m".
+      if (cmd === 'm' && prevCmd === 'z') { result += ' '; }
+      result += cmd;
+
+      cmdSkipped = false;
+    } else {
+      cmdSkipped = true;
+    }
+
+    // Store segment params
+    for (var pos = 1; pos < segment.length; pos++) {
+      var val = segment[pos];
+      // Space can be skipped
+      // 1. After command (always)
+      // 2. For negative value (with '-' at start)
+      if (pos === 1) {
+        if (cmdSkipped && val >= 0) { result += ' '; }
+      } else if (val >= 0) { result += ' '; }
+
+      result += val;
+    }
+
+    prevCmd = cmd;
   }
 
-  return elements.join(' ')
-    // Optimizations: remove spaces around commands & before `-`
-    //
-    // We could also remove leading zeros for `0.5`-like values,
-    // but their count is too small to spend time for.
-    .replace(/ ?([achlmqrstvz]) ?/gi, '$1')
-    .replace(/ \-/g, '-')
-    // workaround for FontForge SVG importing bug
-    .replace(/zm/g, 'z m');
+  return result;
 };
 
 
@@ -2597,65 +2656,142 @@ function validRing(ring) {
   });
 }
 
+// For small rings, brute force is fast enough and guarantees exact results.
+var BRUTE_FORCE_THRESHOLD = 64;
+
 var rotate = function(ring, vs) {
   var len = ring.length,
-    min = Infinity,
-    bestOffset,
-    sumOfSquares,
-    spliced;
-
-  var loop = function ( offset ) {
-    sumOfSquares = 0;
-
-    vs.forEach(function(p, i) {
-      var d = distance(ring[(offset + i) % len], p);
-      sumOfSquares += d * d;
-    });
-
-    if (sumOfSquares < min) {
-      min = sumOfSquares;
-      bestOffset = offset;
-    }
-  };
-
-  for (var offset = 0; offset < len; offset++) loop( offset );
+    bestOffset = len <= BRUTE_FORCE_THRESHOLD
+      ? bruteForce(ring, vs, len)
+      : sparseRefine(ring, vs, len);
 
   if (bestOffset) {
-    spliced = ring.splice(0, bestOffset);
+    var spliced = ring.splice(0, bestOffset);
     ring.splice.apply(ring, [ ring.length, 0 ].concat( spliced ));
   }
 };
 
-var interpolate = function(
-  fromShape,
-  toShape,
-  ref
-) {
-  if ( ref === void 0 ) ref = {};
-  var maxSegmentLength = ref.maxSegmentLength; if ( maxSegmentLength === void 0 ) maxSegmentLength = 10;
-  var string = ref.string; if ( string === void 0 ) string = true;
+// O(n²) exhaustive search — used for small rings to guarantee identical results
+function bruteForce(ring, vs, len) {
+  var min = Infinity,
+    bestOffset = 0;
 
-  var fromRing = normalizeRing(fromShape, maxSegmentLength),
-    toRing = normalizeRing(toShape, maxSegmentLength),
-    interpolator = interpolateRing(fromRing, toRing, string);
-
-  // Extra optimization for near either end with path strings
-  if (
-    !string ||
-    (typeof fromShape !== "string" && typeof toShape !== "string")
-  ) {
-    return interpolator;
+  for (var offset = 0; offset < len; offset++) {
+    var sumOfSquares = sumSq(ring, vs, offset, len);
+    if (sumOfSquares < min) {
+      min = sumOfSquares;
+      bestOffset = offset;
+    }
   }
 
-  return function (t) {
-    if (t < 1e-4 && typeof fromShape === "string") {
-      return fromShape;
+  return bestOffset;
+}
+
+// O(n√n) sparse-then-refine heuristic for large rings.
+// 1. Sample every √n offsets to find a coarse best.
+// 2. Refine by exhaustive search in ±√n window around the coarse best.
+function sparseRefine(ring, vs, len) {
+  var step = Math.max(1, Math.ceil(Math.sqrt(len)));
+
+  // Coarse pass
+  var min = Infinity,
+    bestCoarse = 0;
+
+  for (var offset = 0; offset < len; offset += step) {
+    var ss = sumSq(ring, vs, offset, len);
+    if (ss < min) {
+      min = ss;
+      bestCoarse = offset;
     }
-    if (1 - t < 1e-4 && typeof toShape === "string") {
-      return toShape;
+  }
+
+  // Refine pass: search ±step around the coarse winner
+  var bestOffset = bestCoarse,
+    lo = bestCoarse - step + 1,
+    hi = bestCoarse + step - 1;
+
+  for (var offset = lo; offset <= hi; offset++) {
+    // Wrap into [0, len)
+    var wrapped = ((offset % len) + len) % len;
+    var ss = sumSq(ring, vs, wrapped, len);
+    if (ss < min) {
+      min = ss;
+      bestOffset = wrapped;
+    }
+  }
+
+  return bestOffset;
+}
+
+function sumSq(ring, vs, offset, len) {
+  var sumOfSquares = 0;
+  for (var i = 0; i < vs.length; i++) {
+    var d = distance(ring[(offset + i) % len], vs[i]);
+    sumOfSquares += d * d;
+  }
+  return sumOfSquares;
+}
+
+// Shared option parsing for public API functions.
+// Consolidates the repeated { maxSegmentLength, string, single } destructuring.
+
+var DEFAULTS = {
+  maxSegmentLength: 10,
+  string: true,
+  single: false
+};
+
+function parseOptions(options, includeSingle) {
+  var opts = options || {};
+  var result = {
+    maxSegmentLength:
+      opts.maxSegmentLength !== undefined
+        ? opts.maxSegmentLength
+        : DEFAULTS.maxSegmentLength,
+    string: opts.string !== undefined ? opts.string : DEFAULTS.string
+  };
+  if (includeSingle) {
+    result.single =
+      opts.single !== undefined ? opts.single : DEFAULTS.single;
+  }
+  return result;
+}
+
+// Shared endpoint optimization: at t≈0 return startValue, at t≈1 return endValue,
+// otherwise delegate to the interpolator.  Used by interpolate.js, shape.js, multiple.js.
+
+var EPSILON = 1e-4;
+
+function endpointOptimize(interpolator, startValue, endValue) {
+  if (!startValue && !endValue) {
+    return interpolator;
+  }
+  return function(t) {
+    if (t < EPSILON && startValue) {
+      return startValue;
+    }
+    if (1 - t < EPSILON && endValue) {
+      return endValue;
     }
     return interpolator(t);
   };
+}
+
+var interpolate = function(fromShape, toShape, options) {
+  var opts = parseOptions(options);
+  var fromRing = normalizeRing(fromShape, opts.maxSegmentLength),
+    toRing = normalizeRing(toShape, opts.maxSegmentLength),
+    interpolator = interpolateRing(fromRing, toRing, opts.string);
+
+  if (!opts.string) {
+    return interpolator;
+  }
+
+  return endpointOptimize(
+    interpolator,
+    typeof fromShape === "string" ? fromShape : null,
+    typeof toShape === "string" ? toShape : null
+  );
 };
 
 function interpolateRing(fromRing, toRing, string) {
@@ -2706,10 +2842,10 @@ function earcut(data, holeIndices, dim) {
 
         // minX, minY and invSize are later used to transform coords into integers for z-order calculation
         invSize = Math.max(maxX - minX, maxY - minY);
-        invSize = invSize !== 0 ? 1 / invSize : 0;
+        invSize = invSize !== 0 ? 32767 / invSize : 0;
     }
 
-    earcutLinked(outerNode, triangles, dim, minX, minY, invSize);
+    earcutLinked(outerNode, triangles, dim, minX, minY, invSize, 0);
 
     return triangles;
 }
@@ -2773,9 +2909,9 @@ function earcutLinked(ear, triangles, dim, minX, minY, invSize, pass) {
 
         if (invSize ? isEarHashed(ear, minX, minY, invSize) : isEar(ear)) {
             // cut off the triangle
-            triangles.push(prev.i / dim);
-            triangles.push(ear.i / dim);
-            triangles.push(next.i / dim);
+            triangles.push(prev.i / dim | 0);
+            triangles.push(ear.i / dim | 0);
+            triangles.push(next.i / dim | 0);
 
             removeNode(ear);
 
@@ -2818,10 +2954,18 @@ function isEar(ear) {
     if (area(a, b, c) >= 0) { return false; } // reflex, can't be an ear
 
     // now make sure we don't have other points inside the potential ear
-    var p = ear.next.next;
+    var ax = a.x, bx = b.x, cx = c.x, ay = a.y, by = b.y, cy = c.y;
 
-    while (p !== ear.prev) {
-        if (pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y) &&
+    // triangle bbox; min & max are calculated like this for speed
+    var x0 = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx),
+        y0 = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy),
+        x1 = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx),
+        y1 = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
+
+    var p = c.next;
+    while (p !== a) {
+        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, p.x, p.y) &&
             area(p.prev, p, p.next) >= 0) { return false; }
         p = p.next;
     }
@@ -2836,45 +2980,43 @@ function isEarHashed(ear, minX, minY, invSize) {
 
     if (area(a, b, c) >= 0) { return false; } // reflex, can't be an ear
 
+    var ax = a.x, bx = b.x, cx = c.x, ay = a.y, by = b.y, cy = c.y;
+
     // triangle bbox; min & max are calculated like this for speed
-    var minTX = a.x < b.x ? (a.x < c.x ? a.x : c.x) : (b.x < c.x ? b.x : c.x),
-        minTY = a.y < b.y ? (a.y < c.y ? a.y : c.y) : (b.y < c.y ? b.y : c.y),
-        maxTX = a.x > b.x ? (a.x > c.x ? a.x : c.x) : (b.x > c.x ? b.x : c.x),
-        maxTY = a.y > b.y ? (a.y > c.y ? a.y : c.y) : (b.y > c.y ? b.y : c.y);
+    var x0 = ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx),
+        y0 = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy),
+        x1 = ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx),
+        y1 = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
 
     // z-order range for the current triangle bbox;
-    var minZ = zOrder(minTX, minTY, minX, minY, invSize),
-        maxZ = zOrder(maxTX, maxTY, minX, minY, invSize);
+    var minZ = zOrder(x0, y0, minX, minY, invSize),
+        maxZ = zOrder(x1, y1, minX, minY, invSize);
 
     var p = ear.prevZ,
         n = ear.nextZ;
 
     // look for points inside the triangle in both directions
     while (p && p.z >= minZ && n && n.z <= maxZ) {
-        if (p !== ear.prev && p !== ear.next &&
-            pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y) &&
-            area(p.prev, p, p.next) >= 0) { return false; }
+        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 && p !== a && p !== c &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, p.x, p.y) && area(p.prev, p, p.next) >= 0) { return false; }
         p = p.prevZ;
 
-        if (n !== ear.prev && n !== ear.next &&
-            pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, n.x, n.y) &&
-            area(n.prev, n, n.next) >= 0) { return false; }
+        if (n.x >= x0 && n.x <= x1 && n.y >= y0 && n.y <= y1 && n !== a && n !== c &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, n.x, n.y) && area(n.prev, n, n.next) >= 0) { return false; }
         n = n.nextZ;
     }
 
     // look for remaining points in decreasing z-order
     while (p && p.z >= minZ) {
-        if (p !== ear.prev && p !== ear.next &&
-            pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, p.x, p.y) &&
-            area(p.prev, p, p.next) >= 0) { return false; }
+        if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 && p !== a && p !== c &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, p.x, p.y) && area(p.prev, p, p.next) >= 0) { return false; }
         p = p.prevZ;
     }
 
     // look for remaining points in increasing z-order
     while (n && n.z <= maxZ) {
-        if (n !== ear.prev && n !== ear.next &&
-            pointInTriangle(a.x, a.y, b.x, b.y, c.x, c.y, n.x, n.y) &&
-            area(n.prev, n, n.next) >= 0) { return false; }
+        if (n.x >= x0 && n.x <= x1 && n.y >= y0 && n.y <= y1 && n !== a && n !== c &&
+            pointInTriangle(ax, ay, bx, by, cx, cy, n.x, n.y) && area(n.prev, n, n.next) >= 0) { return false; }
         n = n.nextZ;
     }
 
@@ -2890,9 +3032,9 @@ function cureLocalIntersections(start, triangles, dim) {
 
         if (!equals(a, b) && intersects(a, p, p.next, b) && locallyInside(a, b) && locallyInside(b, a)) {
 
-            triangles.push(a.i / dim);
-            triangles.push(p.i / dim);
-            triangles.push(b.i / dim);
+            triangles.push(a.i / dim | 0);
+            triangles.push(p.i / dim | 0);
+            triangles.push(b.i / dim | 0);
 
             // remove two nodes involved
             removeNode(p);
@@ -2922,8 +3064,8 @@ function splitEarcut(start, triangles, dim, minX, minY, invSize) {
                 c = filterPoints(c, c.next);
 
                 // run earcut on each half
-                earcutLinked(a, triangles, dim, minX, minY, invSize);
-                earcutLinked(c, triangles, dim, minX, minY, invSize);
+                earcutLinked(a, triangles, dim, minX, minY, invSize, 0);
+                earcutLinked(c, triangles, dim, minX, minY, invSize, 0);
                 return;
             }
             b = b.next;
@@ -2949,8 +3091,7 @@ function eliminateHoles(data, holeIndices, outerNode, dim) {
 
     // process holes from left to right
     for (i = 0; i < queue.length; i++) {
-        eliminateHole(queue[i], outerNode);
-        outerNode = filterPoints(outerNode, outerNode.next);
+        outerNode = eliminateHole(queue[i], outerNode);
     }
 
     return outerNode;
@@ -2962,11 +3103,16 @@ function compareX(a, b) {
 
 // find a bridge between vertices that connects hole with an outer ring and and link it
 function eliminateHole(hole, outerNode) {
-    outerNode = findHoleBridge(hole, outerNode);
-    if (outerNode) {
-        var b = splitPolygon(outerNode, hole);
-        filterPoints(b, b.next);
+    var bridge = findHoleBridge(hole, outerNode);
+    if (!bridge) {
+        return outerNode;
     }
+
+    var bridgeReverse = splitPolygon(bridge, hole);
+
+    // filter collinear points around the cuts
+    filterPoints(bridgeReverse, bridgeReverse.next);
+    return filterPoints(bridge, bridge.next);
 }
 
 // David Eberly's algorithm for finding a bridge between hole and outer polygon
@@ -2984,19 +3130,14 @@ function findHoleBridge(hole, outerNode) {
             var x = p.x + (hy - p.y) * (p.next.x - p.x) / (p.next.y - p.y);
             if (x <= hx && x > qx) {
                 qx = x;
-                if (x === hx) {
-                    if (hy === p.y) { return p; }
-                    if (hy === p.next.y) { return p.next; }
-                }
                 m = p.x < p.next.x ? p : p.next;
+                if (x === hx) { return m; } // hole touches outer segment; pick leftmost endpoint
             }
         }
         p = p.next;
     } while (p !== outerNode);
 
     if (!m) { return null; }
-
-    if (hx === qx) { return m; } // hole touches outer segment; pick leftmost endpoint
 
     // look for points inside the triangle of hole point, segment intersection and endpoint;
     // if there are no points found, we have a valid connection;
@@ -3038,7 +3179,7 @@ function sectorContainsSector(m, p) {
 function indexCurve(start, minX, minY, invSize) {
     var p = start;
     do {
-        if (p.z === null) { p.z = zOrder(p.x, p.y, minX, minY, invSize); }
+        if (p.z === 0) { p.z = zOrder(p.x, p.y, minX, minY, invSize); }
         p.prevZ = p.prev;
         p.nextZ = p.next;
         p = p.next;
@@ -3106,8 +3247,8 @@ function sortLinked(list) {
 // z-order of a point given coords and inverse of the longer side of data bbox
 function zOrder(x, y, minX, minY, invSize) {
     // coords are transformed into non-negative 15-bit integer range
-    x = 32767 * (x - minX) * invSize;
-    y = 32767 * (y - minY) * invSize;
+    x = (x - minX) * invSize | 0;
+    y = (y - minY) * invSize | 0;
 
     x = (x | (x << 8)) & 0x00FF00FF;
     x = (x | (x << 4)) & 0x0F0F0F0F;
@@ -3136,9 +3277,9 @@ function getLeftmost(start) {
 
 // check if a point lies within a convex triangle
 function pointInTriangle(ax, ay, bx, by, cx, cy, px, py) {
-    return (cx - px) * (ay - py) - (ax - px) * (cy - py) >= 0 &&
-           (ax - px) * (by - py) - (bx - px) * (ay - py) >= 0 &&
-           (bx - px) * (cy - py) - (cx - px) * (by - py) >= 0;
+    return (cx - px) * (ay - py) >= (ax - px) * (cy - py) &&
+           (ax - px) * (by - py) >= (bx - px) * (ay - py) &&
+           (bx - px) * (cy - py) >= (cx - px) * (by - py);
 }
 
 // check if a diagonal between two polygon nodes is valid (lies in polygon interior)
@@ -3281,7 +3422,7 @@ function Node(i, x, y) {
     this.next = null;
 
     // z-order curve value
-    this.z = null;
+    this.z = 0;
 
     // previous and next nodes in z-order
     this.prevZ = null;
@@ -3377,6 +3518,7 @@ var reverse = function(array, n) {
 };
 
 var feature = function(topology, o) {
+  if (typeof o === "string") { o = topology.objects[o]; }
   return o.type === "GeometryCollection"
       ? {type: "FeatureCollection", features: o.geometries.map(function(o) { return feature$1(topology, o); })}
       : feature$1(topology, o);
@@ -4006,69 +4148,42 @@ function squaredDistance(p1, p2) {
   return d * d;
 }
 
-function separate(
-  fromShape,
-  toShapes,
-  ref
-) {
-  if ( ref === void 0 ) ref = {};
-  var maxSegmentLength = ref.maxSegmentLength; if ( maxSegmentLength === void 0 ) maxSegmentLength = 10;
-  var string = ref.string; if ( string === void 0 ) string = true;
-  var single = ref.single; if ( single === void 0 ) single = false;
-
-  var fromRing = normalizeRing(fromShape, maxSegmentLength);
+function separate(fromShape, toShapes, options) {
+  var opts = parseOptions(options, true);
+  var fromRing = normalizeRing(fromShape, opts.maxSegmentLength);
 
   if (fromRing.length < toShapes.length + 2) {
     addPoints(fromRing, toShapes.length + 2 - fromRing.length);
   }
 
   var fromRings = triangulate(fromRing, toShapes.length),
-    toRings = toShapes.map(function (d) { return normalizeRing(d, maxSegmentLength); }),
+    toRings = toShapes.map(function(d) { return normalizeRing(d, opts.maxSegmentLength); }),
     t0 = typeof fromShape === "string" && fromShape,
     t1;
 
-  if (!single || toShapes.every(function (s) { return typeof s === "string"; })) {
+  if (!opts.single || toShapes.every(function(s) { return typeof s === "string"; })) {
     t1 = toShapes.slice(0);
   }
 
   return interpolateSets(fromRings, toRings, {
     match: true,
-    string: string,
-    single: single,
+    string: opts.string,
+    single: opts.single,
     t0: t0,
     t1: t1
   });
 }
 
-function combine$1(
-  fromShapes,
-  toShape,
-  ref
-) {
-  if ( ref === void 0 ) ref = {};
-  var maxSegmentLength = ref.maxSegmentLength; if ( maxSegmentLength === void 0 ) maxSegmentLength = 10;
-  var string = ref.string; if ( string === void 0 ) string = true;
-  var single = ref.single; if ( single === void 0 ) single = false;
-
-  var interpolators = separate(toShape, fromShapes, {
-    maxSegmentLength: maxSegmentLength,
-    string: string,
-    single: single
-  });
-  return single
-    ? function (t) { return interpolators(1 - t); }
-    : interpolators.map(function (fn) { return function (t) { return fn(1 - t); }; });
+function combine$1(fromShapes, toShape, options) {
+  var opts = parseOptions(options, true);
+  var interpolators = separate(toShape, fromShapes, opts);
+  return opts.single
+    ? function(t) { return interpolators(1 - t); }
+    : interpolators.map(function(fn) { return function(t) { return fn(1 - t); }; });
 }
 
-function interpolateAll(
-  fromShapes,
-  toShapes,
-  ref
-) {
-  if ( ref === void 0 ) ref = {};
-  var maxSegmentLength = ref.maxSegmentLength; if ( maxSegmentLength === void 0 ) maxSegmentLength = 10;
-  var string = ref.string; if ( string === void 0 ) string = true;
-  var single = ref.single; if ( single === void 0 ) single = false;
+function interpolateAll(fromShapes, toShapes, options) {
+  var opts = parseOptions(options, true);
 
   if (
     !Array.isArray(fromShapes) ||
@@ -4079,17 +4194,17 @@ function interpolateAll(
     throw new TypeError(INVALID_INPUT_ALL);
   }
 
-  var normalize = function (s) { return normalizeRing(s, maxSegmentLength); },
+  var normalize = function(s) { return normalizeRing(s, opts.maxSegmentLength); },
     fromRings = fromShapes.map(normalize),
     toRings = toShapes.map(normalize),
     t0,
     t1;
 
-  if (single) {
-    if (fromShapes.every(function (s) { return typeof s === "string"; })) {
+  if (opts.single) {
+    if (fromShapes.every(function(s) { return typeof s === "string"; })) {
       t0 = fromShapes.slice(0);
     }
-    if (toShapes.every(function (s) { return typeof s === "string"; })) {
+    if (toShapes.every(function(s) { return typeof s === "string"; })) {
       t1 = toShapes.slice(0);
     }
   } else {
@@ -4098,37 +4213,44 @@ function interpolateAll(
   }
 
   return interpolateSets(fromRings, toRings, {
-    string: string,
-    single: single,
+    string: opts.string,
+    single: opts.single,
     t0: t0,
     t1: t1,
     match: false
   });
 }
 
-function interpolateSets(
-  fromRings,
-  toRings,
-  ref
-) {
-  if ( ref === void 0 ) ref = {};
-  var string = ref.string;
-  var single = ref.single;
-  var t0 = ref.t0;
-  var t1 = ref.t1;
-  var match = ref.match;
+// --- Decomposed interpolateSets ---
 
+function interpolateSets(fromRings, toRings, opts) {
+  var string = opts.string,
+    single = opts.single,
+    t0 = opts.t0,
+    t1 = opts.t1,
+    match = opts.match;
+
+  // Determine ordering and build per-ring interpolators
   var order = match
       ? pieceOrder(fromRings, toRings)
-      : fromRings.map(function (d, i) { return i; }),
-    interpolators = order.map(function (d, i) { return interpolateRing(fromRings[d], toRings[i], string); }
-    );
+      : fromRings.map(function(d, i) { return i; }),
+    interpolators = order.map(function(d, i) {
+      return interpolateRing(fromRings[d], toRings[i], string);
+    });
 
+  // Reorder t0 to match the new ordering when matching
   if (match && Array.isArray(t0)) {
-    t0 = order.map(function (d) { return t0[d]; });
+    t0 = order.map(function(d) { return t0[d]; });
   }
 
-  if (single && string) {
+  return single
+    ? wrapSingle(interpolators, string, t0, t1)
+    : wrapArray(interpolators, string, t0, t1);
+}
+
+// Single mode: combine all interpolators into one function, then apply endpoint optimization
+function wrapSingle(interpolators, string, t0, t1) {
+  if (string) {
     if (Array.isArray(t0)) {
       t0 = t0.join(" ");
     }
@@ -4137,28 +4259,33 @@ function interpolateSets(
     }
   }
 
-  if (single) {
-    var multiInterpolator = string
-      ? function (t) { return interpolators.map(function (fn) { return fn(t); }).join(" "); }
-      : function (t) { return interpolators.map(function (fn) { return fn(t); }); };
+  var multiInterpolator = string
+    ? function(t) { return interpolators.map(function(fn) { return fn(t); }).join(" "); }
+    : function(t) { return interpolators.map(function(fn) { return fn(t); }); };
 
-    if (string && (t0 || t1)) {
-      return function (t) { return (t < 1e-4 && t0) || (1 - t < 1e-4 && t1) || multiInterpolator(t); };
-    }
+  // Endpoint optimization only applies in string mode (preserving original path strings)
+  if (!string) {
     return multiInterpolator;
-  } else if (string) {
-    t0 = Array.isArray(t0) ? t0.map(function (d) { return typeof d === "string" && d; }) : [];
-    t1 = Array.isArray(t1) ? t1.map(function (d) { return typeof d === "string" && d; }) : [];
+  }
+  return endpointOptimize(multiInterpolator, t0 || null, t1 || null);
+}
 
-    return interpolators.map(function (fn, i) {
-      if (t0[i] || t1[i]) {
-        return function (t) { return (t < 1e-4 && t0[i]) || (1 - t < 1e-4 && t1[i]) || fn(t); };
-      }
-      return fn;
-    });
+// Array mode: wrap each interpolator individually with endpoint optimization
+function wrapArray(interpolators, string, t0, t1) {
+  if (!string) {
+    return interpolators;
   }
 
-  return interpolators;
+  t0 = Array.isArray(t0)
+    ? t0.map(function(d) { return typeof d === "string" && d; })
+    : [];
+  t1 = Array.isArray(t1)
+    ? t1.map(function(d) { return typeof d === "string" && d; })
+    : [];
+
+  return interpolators.map(function(fn, i) {
+    return endpointOptimize(fn, t0[i] || null, t1[i] || null);
+  });
 }
 
 function fromCircle(x, y, radius, toShape, options) {
@@ -4173,7 +4300,7 @@ function fromCircle(x, y, radius, toShape, options) {
 
 function toCircle(fromShape, x, y, radius, options) {
   var interpolator = fromCircle(x, y, radius, fromShape, options);
-  return function (t) { return interpolator(1 - t); };
+  return function(t) { return interpolator(1 - t); };
 }
 
 function fromRect(x, y, width, height, toShape, options) {
@@ -4188,60 +4315,53 @@ function fromRect(x, y, width, height, toShape, options) {
 
 function toRect(fromShape, x, y, width, height, options) {
   var interpolator = fromRect(x, y, width, height, fromShape, options);
-  return function (t) { return interpolator(1 - t); };
+  return function(t) { return interpolator(1 - t); };
 }
 
-function fromShape(
-  fromFn,
-  toShape,
-  original,
-  perimeter,
-  ref
-) {
-  if ( ref === void 0 ) ref = {};
-  var maxSegmentLength = ref.maxSegmentLength; if ( maxSegmentLength === void 0 ) maxSegmentLength = 10;
-  var string = ref.string; if ( string === void 0 ) string = true;
-
-  var toRing = normalizeRing(toShape, maxSegmentLength),
+function fromShape(fromFn, toShape, original, perimeter, options) {
+  var opts = parseOptions(options);
+  var toRing = normalizeRing(toShape, opts.maxSegmentLength),
     fromRing,
     interpolator;
 
   // Enforce maxSegmentLength on circle/rect perimeter too
   if (
     isFiniteNumber(perimeter) &&
-    toRing.length < perimeter / maxSegmentLength
+    toRing.length < perimeter / opts.maxSegmentLength
   ) {
-    addPoints(toRing, Math.ceil(perimeter / maxSegmentLength - toRing.length));
+    addPoints(toRing, Math.ceil(perimeter / opts.maxSegmentLength - toRing.length));
   }
 
   fromRing = fromFn(toRing);
-  interpolator = interpolatePoints(fromRing, toRing, string);
+  interpolator = interpolatePoints(fromRing, toRing, opts.string);
 
-  if (string) {
-    return function (t) { return (t < 1e-4 ? original : interpolator(t)); };
-  }
+  return endpointOptimize(interpolator, opts.string ? original : null, null);
+}
 
-  return interpolator;
+// Shared framework: walk along the ring's perimeter, computing progress [0..1)
+// and the starting angle from centroid, then delegate to mapFn for each point.
+function mapAlongPerimeter(ring, mapFn) {
+  var centroid = polygonCentroid$$1(ring),
+    perimeter = polygonLength(ring.concat( [ring[0]])),
+    startingAngle = Math.atan2(
+      ring[0][1] - centroid[1],
+      ring[0][0] - centroid[0]
+    ),
+    along = 0;
+
+  return ring.map(function(point, i) {
+    if (i) {
+      along += distance(point, ring[i - 1]);
+    }
+    var progress = perimeter ? along / perimeter : i / ring.length;
+    return mapFn(progress, startingAngle);
+  });
 }
 
 function circlePoints(x, y, radius) {
   return function(ring) {
-    var centroid = polygonCentroid$$1(ring),
-      perimeter = polygonLength(ring.concat( [ring[0]])),
-      startingAngle = Math.atan2(
-        ring[0][1] - centroid[1],
-        ring[0][0] - centroid[0]
-      ),
-      along = 0;
-
-    return ring.map(function (point, i) {
-      var angle;
-      if (i) {
-        along += distance(point, ring[i - 1]);
-      }
-      angle =
-        startingAngle +
-        2 * Math.PI * (perimeter ? along / perimeter : i / ring.length);
+    return mapAlongPerimeter(ring, function(progress, startingAngle) {
+      var angle = startingAngle + 2 * Math.PI * progress;
       return [Math.cos(angle) * radius + x, Math.sin(angle) * radius + y];
     });
   };
@@ -4250,28 +4370,10 @@ function circlePoints(x, y, radius) {
 // TODO splice in exact corners?
 function rectPoints(x, y, width, height) {
   return function(ring) {
-    var centroid = polygonCentroid$$1(ring),
-      perimeter = polygonLength(ring.concat( [ring[0]])),
-      startingAngle = Math.atan2(
-        ring[0][1] - centroid[1],
-        ring[0][0] - centroid[0]
-      ),
-      along = 0;
-
-    if (startingAngle < 0) {
-      startingAngle = 2 * Math.PI + startingAngle;
-    }
-
-    var startingProgress = startingAngle / (2 * Math.PI);
-
-    return ring.map(function (point, i) {
-      if (i) {
-        along += distance(point, ring[i - 1]);
-      }
-      var relative = rectPoint(
-        (startingProgress + (perimeter ? along / perimeter : i / ring.length)) %
-          1
-      );
+    return mapAlongPerimeter(ring, function(progress, startingAngle) {
+      var sa = startingAngle < 0 ? 2 * Math.PI + startingAngle : startingAngle;
+      var startingProgress = sa / (2 * Math.PI);
+      var relative = rectPoint((startingProgress + progress) % 1);
       return [x + relative[0] * width, y + relative[1] * height];
     });
   };

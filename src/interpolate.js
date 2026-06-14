@@ -2,37 +2,28 @@ import normalizeRing from "./normalize.js";
 import { addPoints } from "./add.js";
 import rotate from "./rotate.js";
 import { interpolatePoints } from "./math.js";
+import { parseOptions } from "./options.js";
+import { endpointOptimize } from "./endpoint.js";
 
-export default function(
-  fromShape,
-  toShape,
-  { maxSegmentLength = 10, string = true } = {}
-) {
-  let fromRing = normalizeRing(fromShape, maxSegmentLength),
-    toRing = normalizeRing(toShape, maxSegmentLength),
-    interpolator = interpolateRing(fromRing, toRing, string);
+export default function(fromShape, toShape, options) {
+  var opts = parseOptions(options);
+  var fromRing = normalizeRing(fromShape, opts.maxSegmentLength),
+    toRing = normalizeRing(toShape, opts.maxSegmentLength),
+    interpolator = interpolateRing(fromRing, toRing, opts.string);
 
-  // Extra optimization for near either end with path strings
-  if (
-    !string ||
-    (typeof fromShape !== "string" && typeof toShape !== "string")
-  ) {
+  if (!opts.string) {
     return interpolator;
   }
 
-  return t => {
-    if (t < 1e-4 && typeof fromShape === "string") {
-      return fromShape;
-    }
-    if (1 - t < 1e-4 && typeof toShape === "string") {
-      return toShape;
-    }
-    return interpolator(t);
-  };
+  return endpointOptimize(
+    interpolator,
+    typeof fromShape === "string" ? fromShape : null,
+    typeof toShape === "string" ? toShape : null
+  );
 }
 
 export function interpolateRing(fromRing, toRing, string) {
-  let diff;
+  var diff;
 
   diff = fromRing.length - toRing.length;
 
