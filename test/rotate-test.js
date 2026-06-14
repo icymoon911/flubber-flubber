@@ -46,6 +46,73 @@ tape("Min Distance", function(test) {
   test.end();
 });
 
+tape("Large ring rotation correctness (heuristic matches brute force)", function(test) {
+  // Generate a large ring of points on a circle
+  let n = 200,
+    ring = [],
+    target = [];
+
+  for (let i = 0; i < n; i++) {
+    let angle = 2 * Math.PI * i / n;
+    ring.push([Math.cos(angle) * 100, Math.sin(angle) * 100]);
+  }
+  target = ring.slice(0);
+
+  // Test multiple rotation offsets
+  for (let offset = 0; offset < n; offset += 37) {
+    let rotated = target.slice(0);
+    for (let i = 0; i < offset; i++) {
+      rotated.push(rotated.shift());
+    }
+
+    rotate(rotated, target);
+
+    test.deepEqual(
+      rotated,
+      target,
+      "Ring of " + n + " points should match after rotating by " + offset
+    );
+  }
+
+  test.end();
+});
+
+tape("Large ring rotation performance", function(test) {
+  let n = 500,
+    ring = [],
+    target = [];
+
+  for (let i = 0; i < n; i++) {
+    let angle = 2 * Math.PI * i / n;
+    ring.push([Math.cos(angle) * 100, Math.sin(angle) * 100]);
+  }
+  target = ring.slice(0);
+
+  let rotated = target.slice(0);
+  // Shift by a non-trivial offset
+  for (let i = 0; i < 123; i++) {
+    rotated.push(rotated.shift());
+  }
+
+  let start = Date.now();
+  rotate(rotated, target);
+  let elapsed = Date.now() - start;
+
+  // The heuristic approach should complete well under 1 second for 500 points.
+  // Brute force O(n^2) would take noticeably longer.
+  test.assert(
+    elapsed < 2000,
+    "Rotation of " + n + "-point ring completed in " + elapsed + "ms (< 2000ms)"
+  );
+  test.deepEqual(
+    rotated,
+    target,
+    "Rotated ring should match target after heuristic rotation"
+  );
+
+  test.end();
+});
+
 function offsetRing(arr, n) {
   for (let i = 0; i < n; i++) {
     arr.push(arr.shift());

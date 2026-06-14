@@ -4,56 +4,53 @@ import normalizeRing from "./normalize.js";
 import triangulate from "./triangulate.js";
 import pieceOrder from "./order.js";
 import { INVALID_INPUT_ALL } from "./errors.js";
+import {
+  parseMultiOptions,
+  withEndpointPreservation,
+  prepareEndpointValues,
+  wrapInterpolators
+} from "./utils.js";
 
-export function separate(
-  fromShape,
-  toShapes,
-  { maxSegmentLength = 10, string = true, single = false } = {}
-) {
-  let fromRing = normalizeRing(fromShape, maxSegmentLength);
+export function separate(fromShape, toShapes, options) {
+  var opts = parseMultiOptions(options),
+    fromRing = normalizeRing(fromShape, opts.maxSegmentLength);
 
   if (fromRing.length < toShapes.length + 2) {
     addPoints(fromRing, toShapes.length + 2 - fromRing.length);
   }
 
-  let fromRings = triangulate(fromRing, toShapes.length),
-    toRings = toShapes.map(d => normalizeRing(d, maxSegmentLength)),
-    t0 = typeof fromShape === "string" && fromShape,
+  var fromRings = triangulate(fromRing, toShapes.length),
+    toRings = toShapes.map(function (d) { return normalizeRing(d, opts.maxSegmentLength); }),
+    t0 = typeof fromShape === "string" ? fromShape : false,
     t1;
 
-  if (!single || toShapes.every(s => typeof s === "string")) {
+  if (!opts.single || toShapes.every(function (s) { return typeof s === "string"; })) {
     t1 = toShapes.slice(0);
   }
 
   return interpolateSets(fromRings, toRings, {
     match: true,
-    string,
-    single,
-    t0,
-    t1
+    string: opts.string,
+    single: opts.single,
+    t0: t0,
+    t1: t1
   });
 }
 
-export function combine(
-  fromShapes,
-  toShape,
-  { maxSegmentLength = 10, string = true, single = false } = {}
-) {
-  let interpolators = separate(toShape, fromShapes, {
-    maxSegmentLength,
-    string,
-    single
-  });
-  return single
-    ? t => interpolators(1 - t)
-    : interpolators.map(fn => t => fn(1 - t));
+export function combine(fromShapes, toShape, options) {
+  var opts = parseMultiOptions(options),
+    interpolators = separate(toShape, fromShapes, {
+      maxSegmentLength: opts.maxSegmentLength,
+      string: opts.string,
+      single: opts.single
+    });
+
+  return opts.single
+    ? function (t) { return interpolators(1 - t); }
+    : interpolators.map(function (fn) { return function (t) { return fn(1 - t); }; });
 }
 
-export function interpolateAll(
-  fromShapes,
-  toShapes,
-  { maxSegmentLength = 10, string = true, single = false } = {}
-) {
+export function interpolateAll(fromShapes, toShapes, options) {
   if (
     !Array.isArray(fromShapes) ||
     !Array.isArray(toShapes) ||
@@ -63,17 +60,18 @@ export function interpolateAll(
     throw new TypeError(INVALID_INPUT_ALL);
   }
 
-  let normalize = s => normalizeRing(s, maxSegmentLength),
+  var opts = parseMultiOptions(options),
+    normalize = function (s) { return normalizeRing(s, opts.maxSegmentLength); },
     fromRings = fromShapes.map(normalize),
     toRings = toShapes.map(normalize),
     t0,
     t1;
 
-  if (single) {
-    if (fromShapes.every(s => typeof s === "string")) {
+  if (opts.single) {
+    if (fromShapes.every(function (s) { return typeof s === "string"; })) {
       t0 = fromShapes.slice(0);
     }
-    if (toShapes.every(s => typeof s === "string")) {
+    if (toShapes.every(function (s) { return typeof s === "string"; })) {
       t1 = toShapes.slice(0);
     }
   } else {
@@ -82,59 +80,77 @@ export function interpolateAll(
   }
 
   return interpolateSets(fromRings, toRings, {
-    string,
-    single,
-    t0,
-    t1,
+    string: opts.string,
+    single: opts.single,
+    t0: t0,
+    t1: t1,
     match: false
   });
 }
 
-function interpolateSets(
-  fromRings,
-  toRings,
-  { string, single, t0, t1, match } = {}
-) {
-  let order = match
-      ? pieceOrder(fromRings, toRings)
-      : fromRings.map((d, i) => i),
-    interpolators = order.map((d, i) =>
-      interpolateRing(fromRings[d], toRings[i], string)
-    );
+// --- Internal helpers for interpolateSets ---
 
+/**
+ * Create per-pair interpolators, optionally reordering the fromRings to
+ * best match the toRings.
+ */
+function createInterpolators(fromRings, toRings, match, string) {
+  var order = match
+    ? pieceOrder(fromRings, toRings)
+    : fromRings.map(function (d, i) { return i; });
+
+  return {
+    order: order,
+    interpolators: order.map(function (d, i) {
+      return interpolateRing(fromRings[d], toRings[i], string);
+    })
+  };
+}
+
+/**
+ * Build the final return value for single=true mode: a single function
+ * that returns all interpolated paths (as a joined string or an array).
+ */
+function buildSingleInterpolator(interpolators, string, t0, t1) {
+  var multiInterpolator = string
+    ? function (t) { return interpolators.map(function (fn) { return fn(t); }).join(" "); }
+    : function (t) { return interpolators.map(function (fn) { return fn(t); }); };
+
+  return withEndpointPreservation(multiInterpolator, t0, t1);
+}
+
+/**
+ * Orchestrates the creation of interpolators from sets of rings, handling
+ * ordering, endpoint preservation, and single vs. array return modes.
+ */
+function interpolateSets(fromRings, toRings, config) {
+  var match = config.match,
+    string = config.string,
+    single = config.single,
+    t0 = config.t0,
+    t1 = config.t1;
+
+  var result = createInterpolators(fromRings, toRings, match, string),
+    interpolators = result.interpolators,
+    order = result.order;
+
+  // Reorder t0 according to the matching order when t0 is an array
   if (match && Array.isArray(t0)) {
-    t0 = order.map(d => t0[d]);
-  }
-
-  if (single && string) {
-    if (Array.isArray(t0)) {
-      t0 = t0.join(" ");
-    }
-    if (Array.isArray(t1)) {
-      t1 = t1.join(" ");
-    }
+    t0 = order.map(function (d) { return t0[d]; });
   }
 
   if (single) {
-    let multiInterpolator = string
-      ? t => interpolators.map(fn => fn(t)).join(" ")
-      : t => interpolators.map(fn => fn(t));
+    var singleT0 = prepareEndpointValues(t0, true);
+    var singleT1 = prepareEndpointValues(t1, true);
 
-    if (string && (t0 || t1)) {
-      return t =>
-        (t < 1e-4 && t0) || (1 - t < 1e-4 && t1) || multiInterpolator(t);
+    if (string) {
+      return buildSingleInterpolator(interpolators, true, singleT0, singleT1);
     }
-    return multiInterpolator;
-  } else if (string) {
-    t0 = Array.isArray(t0) ? t0.map(d => typeof d === "string" && d) : [];
-    t1 = Array.isArray(t1) ? t1.map(d => typeof d === "string" && d) : [];
+    return buildSingleInterpolator(interpolators, false, false, false);
+  }
 
-    return interpolators.map((fn, i) => {
-      if (t0[i] || t1[i]) {
-        return t => (t < 1e-4 && t0[i]) || (1 - t < 1e-4 && t1[i]) || fn(t);
-      }
-      return fn;
-    });
+  if (string) {
+    return wrapInterpolators(interpolators, t0, t1);
   }
 
   return interpolators;

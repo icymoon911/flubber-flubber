@@ -2,41 +2,28 @@ import normalizeRing from "./normalize.js";
 import { addPoints } from "./add.js";
 import rotate from "./rotate.js";
 import { interpolatePoints } from "./math.js";
+import { parseOptions, withEndpointPreservation } from "./utils.js";
 
-export default function(
-  fromShape,
-  toShape,
-  { maxSegmentLength = 10, string = true } = {}
-) {
-  let fromRing = normalizeRing(fromShape, maxSegmentLength),
-    toRing = normalizeRing(toShape, maxSegmentLength),
-    interpolator = interpolateRing(fromRing, toRing, string);
+export default function (fromShape, toShape, options) {
+  var opts = parseOptions(options),
+    fromRing = normalizeRing(fromShape, opts.maxSegmentLength),
+    toRing = normalizeRing(toShape, opts.maxSegmentLength),
+    interpolator = interpolateRing(fromRing, toRing, opts.string);
 
-  // Extra optimization for near either end with path strings
-  if (
-    !string ||
-    (typeof fromShape !== "string" && typeof toShape !== "string")
-  ) {
+  if (!opts.string) {
     return interpolator;
   }
 
-  return t => {
-    if (t < 1e-4 && typeof fromShape === "string") {
-      return fromShape;
-    }
-    if (1 - t < 1e-4 && typeof toShape === "string") {
-      return toShape;
-    }
-    return interpolator(t);
-  };
+  return withEndpointPreservation(
+    interpolator,
+    typeof fromShape === "string" ? fromShape : false,
+    typeof toShape === "string" ? toShape : false
+  );
 }
 
 export function interpolateRing(fromRing, toRing, string) {
-  let diff;
+  var diff = fromRing.length - toRing.length;
 
-  diff = fromRing.length - toRing.length;
-
-  // TODO bisect and add points in one step?
   addPoints(fromRing, diff < 0 ? diff * -1 : 0);
   addPoints(toRing, diff > 0 ? diff : 0);
 
