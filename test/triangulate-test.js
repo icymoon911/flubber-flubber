@@ -48,7 +48,10 @@ tape("Create/collapse a triangulation", function(test) {
   test.deepEqual(collapsed, [[[100, 100], [0, 100], [0, 0], [100, 0]]]);
   test.equal(topology.objects.triangles.geometries.length, 1);
 
-  test.throws(() => collapseTopology(topology, 2));
+  // Graceful degradation: requesting more pieces than available should not throw
+  let degraded = collapseTopology(topology, 2);
+  test.equal(degraded.length, 1);
+  test.deepEqual(degraded, [[[100, 100], [0, 100], [0, 0], [100, 0]]]);
 
   test.end();
 });

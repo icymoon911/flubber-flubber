@@ -90,7 +90,6 @@ export function circlePoints(x, y, radius) {
   };
 }
 
-// TODO splice in exact corners?
 export function rectPoints(x, y, width, height) {
   return function(ring) {
     let centroid = polygonCentroid(ring),
@@ -107,16 +106,47 @@ export function rectPoints(x, y, width, height) {
 
     let startingProgress = startingAngle / (2 * Math.PI);
 
-    return ring.map((point, i) => {
+    let progressValues = ring.map((point, i) => {
       if (i) {
         along += distance(point, ring[i - 1]);
       }
-      let relative = rectPoint(
-        (startingProgress + (perimeter ? along / perimeter : i / ring.length)) %
-          1
-      );
+      return (startingProgress + (perimeter ? along / perimeter : i / ring.length)) % 1;
+    });
+
+    let result = progressValues.map(p => {
+      let relative = rectPoint(p);
       return [x + relative[0] * width, y + relative[1] * height];
     });
+
+    // Splice in exact corners: snap the closest unused ring point to each corner
+    let corners = [
+      { progress: 1 / 8, coord: [x + width, y + height] },
+      { progress: 3 / 8, coord: [x, y + height] },
+      { progress: 5 / 8, coord: [x, y] },
+      { progress: 7 / 8, coord: [x + width, y] }
+    ];
+
+    let used = new Set();
+    for (let c = 0; c < corners.length; c++) {
+      let corner = corners[c];
+      let bestIdx = -1,
+        bestDist = Infinity;
+      for (let i = 0; i < progressValues.length; i++) {
+        if (used.has(i)) continue;
+        let d = Math.abs(progressValues[i] - corner.progress);
+        d = Math.min(d, 1 - d);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx >= 0) {
+        used.add(bestIdx);
+        result[bestIdx] = corner.coord.slice();
+      }
+    }
+
+    return result;
   };
 }
 

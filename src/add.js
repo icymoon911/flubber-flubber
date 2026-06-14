@@ -2,8 +2,18 @@ import { polygonLength } from "d3-polygon";
 import { distance, pointAlong } from "./math.js";
 
 export function addPoints(ring, numPoints) {
+  const len = polygonLength(ring);
+
+  // Zero-length ring: all points coincide, just duplicate the existing point
+  if (!len) {
+    for (let i = 0; i < numPoints; i++) {
+      ring.splice(ring.length, 0, ring[0].slice(0));
+    }
+    return;
+  }
+
   const desiredLength = ring.length + numPoints,
-    step = polygonLength(ring) / numPoints;
+    step = len / numPoints;
 
   let i = 0,
     cursor = 0,

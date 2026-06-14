@@ -51,11 +51,15 @@ function exactRing(parsed) {
     } else if (command === "V") {
       ring.push([ring[ring.length - 1][0], x]);
     } else {
-      return false;
+      // Curve command (C, S, Q, T, A, etc.): stop parsing but keep any
+      // straight-line segments already collected rather than discarding them.
+      break;
     }
   }
 
-  return ring.length ? { ring } : false;
+  // Require at least 3 points (a valid polygon) before returning a partial
+  // exact ring; otherwise fall back to full approximation.
+  return ring.length >= 3 ? { ring } : false;
 }
 
 function approximateRing(parsed, maxSegmentLength) {

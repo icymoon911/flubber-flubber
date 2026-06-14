@@ -61,12 +61,7 @@ export function collapseTopology(topology, numPieces) {
     mergeSmallestFeature();
   }
 
-  if (numPieces > geometries.length) {
-    throw new RangeError(
-      "Can't collapse topology into " + numPieces + " pieces."
-    );
-  }
-
+  // Graceful degradation: if fewer triangles than requested numPieces, return what we have
   return feature(topology, topology.objects.triangles).features.map(f => {
     f.geometry.coordinates[0].pop();
     return f.geometry.coordinates[0];

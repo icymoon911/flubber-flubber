@@ -9,3 +9,5 @@ export const INVALID_INPUT_ALL = `flubber.all() expects two arrays of equal leng
 export const INVALID_PATH_STRING = `Invalid SVG path string supplied.
 Path string reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/d
 `;
+
+export const INVALID_SEPARATE_TARGET = `flubber.separate() requires each target shape in toShapes to be a non-empty array of [x, y] points or a non-empty SVG path string. An invalid or empty shape was found at index `;

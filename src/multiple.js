@@ -3,13 +3,33 @@ import { addPoints } from "./add.js";
 import normalizeRing from "./normalize.js";
 import triangulate from "./triangulate.js";
 import pieceOrder from "./order.js";
-import { INVALID_INPUT_ALL } from "./errors.js";
+import { INVALID_INPUT_ALL, INVALID_SEPARATE_TARGET } from "./errors.js";
 
 export function separate(
   fromShape,
   toShapes,
   { maxSegmentLength = 10, string = true, single = false } = {}
 ) {
+  // Validate toShapes: each element must be a non-empty array or non-empty string
+  if (!Array.isArray(toShapes) || !toShapes.length) {
+    throw new TypeError(INVALID_SEPARATE_TARGET + "(expected a non-empty array of target shapes).");
+  }
+
+  for (let i = 0; i < toShapes.length; i++) {
+    let shape = toShapes[i];
+    if (Array.isArray(shape)) {
+      if (!shape.length) {
+        throw new TypeError(INVALID_SEPARATE_TARGET + i + " (empty array).");
+      }
+    } else if (typeof shape === "string") {
+      if (!shape.trim()) {
+        throw new TypeError(INVALID_SEPARATE_TARGET + i + " (empty string).");
+      }
+    } else {
+      throw new TypeError(INVALID_SEPARATE_TARGET + i + " (expected an array of points or an SVG path string).");
+    }
+  }
+
   let fromRing = normalizeRing(fromShape, maxSegmentLength);
 
   if (fromRing.length < toShapes.length + 2) {
