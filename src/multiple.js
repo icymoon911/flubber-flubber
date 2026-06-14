@@ -4,11 +4,12 @@ import normalizeRing from "./normalize.js";
 import triangulate from "./triangulate.js";
 import pieceOrder from "./order.js";
 import { INVALID_INPUT_ALL } from "./errors.js";
+import { resolveEasing } from "./easing.js";
 
 export function separate(
   fromShape,
   toShapes,
-  { maxSegmentLength = 10, string = true, single = false } = {}
+  { maxSegmentLength = 10, string = true, single = false, easing } = {}
 ) {
   let fromRing = normalizeRing(fromShape, maxSegmentLength);
 
@@ -30,19 +31,21 @@ export function separate(
     string,
     single,
     t0,
-    t1
+    t1,
+    easing
   });
 }
 
 export function combine(
   fromShapes,
   toShape,
-  { maxSegmentLength = 10, string = true, single = false } = {}
+  { maxSegmentLength = 10, string = true, single = false, easing } = {}
 ) {
   let interpolators = separate(toShape, fromShapes, {
     maxSegmentLength,
     string,
-    single
+    single,
+    easing
   });
   return single
     ? t => interpolators(1 - t)
@@ -52,7 +55,7 @@ export function combine(
 export function interpolateAll(
   fromShapes,
   toShapes,
-  { maxSegmentLength = 10, string = true, single = false } = {}
+  { maxSegmentLength = 10, string = true, single = false, easing } = {}
 ) {
   if (
     !Array.isArray(fromShapes) ||
@@ -86,18 +89,22 @@ export function interpolateAll(
     single,
     t0,
     t1,
-    match: false
+    match: false,
+    easing
   });
 }
 
 function interpolateSets(
   fromRings,
   toRings,
-  { string, single, t0, t1, match } = {}
+  { string, single, t0, t1, match, easing } = {}
 ) {
-  let order = match
+  let ease = resolveEasing(easing),
+    order = match
       ? pieceOrder(fromRings, toRings)
       : fromRings.map((d, i) => i),
+    // Don't pass easing to interpolateRing — apply it only in the wrappers
+    // below to avoid double-easing (interpolateRing → interpolatePoints).
     interpolators = order.map((d, i) =>
       interpolateRing(fromRings[d], toRings[i], string)
     );
@@ -121,8 +128,16 @@ function interpolateSets(
       : t => interpolators.map(fn => fn(t));
 
     if (string && (t0 || t1)) {
-      return t =>
-        (t < 1e-4 && t0) || (1 - t < 1e-4 && t1) || multiInterpolator(t);
+      return t => {
+        let et = ease(t);
+        return (et < 1e-4 && t0) || (1 - et < 1e-4 && t1) || multiInterpolator(et);
+      };
+    }
+    // Apply easing to the inner interpolator call
+    if (easing != null) {
+      return string
+        ? t => interpolators.map(fn => fn(ease(t))).join(" ")
+        : t => interpolators.map(fn => fn(ease(t)));
     }
     return multiInterpolator;
   } else if (string) {
@@ -131,11 +146,22 @@ function interpolateSets(
 
     return interpolators.map((fn, i) => {
       if (t0[i] || t1[i]) {
-        return t => (t < 1e-4 && t0[i]) || (1 - t < 1e-4 && t1[i]) || fn(t);
+        return t => {
+          let et = ease(t);
+          return (et < 1e-4 && t0[i]) || (1 - et < 1e-4 && t1[i]) || fn(et);
+        };
+      }
+      // Apply easing even when there's no string short-circuit
+      if (easing != null) {
+        return t => fn(ease(t));
       }
       return fn;
     });
   }
 
+  // Non-string, non-single: wrap each interpolator with easing
+  if (easing != null) {
+    return interpolators.map(fn => t => fn(ease(t)));
+  }
   return interpolators;
 }

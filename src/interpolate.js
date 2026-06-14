@@ -2,15 +2,17 @@ import normalizeRing from "./normalize.js";
 import { addPoints } from "./add.js";
 import rotate from "./rotate.js";
 import { interpolatePoints } from "./math.js";
+import { resolveEasing } from "./easing.js";
 
 export default function(
   fromShape,
   toShape,
-  { maxSegmentLength = 10, string = true } = {}
+  { maxSegmentLength = 10, string = true, easing } = {}
 ) {
   let fromRing = normalizeRing(fromShape, maxSegmentLength),
     toRing = normalizeRing(toShape, maxSegmentLength),
-    interpolator = interpolateRing(fromRing, toRing, string);
+    interpolator = interpolateRing(fromRing, toRing, string, easing),
+    ease = resolveEasing(easing);
 
   // Extra optimization for near either end with path strings
   if (
@@ -21,17 +23,18 @@ export default function(
   }
 
   return t => {
-    if (t < 1e-4 && typeof fromShape === "string") {
+    let et = ease(t);
+    if (et < 1e-4 && typeof fromShape === "string") {
       return fromShape;
     }
-    if (1 - t < 1e-4 && typeof toShape === "string") {
+    if (1 - et < 1e-4 && typeof toShape === "string") {
       return toShape;
     }
     return interpolator(t);
   };
 }
 
-export function interpolateRing(fromRing, toRing, string) {
+export function interpolateRing(fromRing, toRing, string, easing) {
   let diff;
 
   diff = fromRing.length - toRing.length;
@@ -42,5 +45,5 @@ export function interpolateRing(fromRing, toRing, string) {
 
   rotate(fromRing, toRing);
 
-  return interpolatePoints(fromRing, toRing, string);
+  return interpolatePoints(fromRing, toRing, string, easing);
 }

@@ -7,6 +7,7 @@ import {
 } from "./math.js";
 import normalizeRing from "./normalize.js";
 import { addPoints } from "./add.js";
+import { resolveEasing } from "./easing.js";
 
 export function fromCircle(x, y, radius, toShape, options) {
   return fromShape(
@@ -43,11 +44,12 @@ function fromShape(
   toShape,
   original,
   perimeter,
-  { maxSegmentLength = 10, string = true } = {}
+  { maxSegmentLength = 10, string = true, easing } = {}
 ) {
   let toRing = normalizeRing(toShape, maxSegmentLength),
     fromRing,
-    interpolator;
+    interpolator,
+    ease = resolveEasing(easing);
 
   // Enforce maxSegmentLength on circle/rect perimeter too
   if (
@@ -58,10 +60,13 @@ function fromShape(
   }
 
   fromRing = fromFn(toRing);
-  interpolator = interpolatePoints(fromRing, toRing, string);
+  interpolator = interpolatePoints(fromRing, toRing, string, easing);
 
   if (string) {
-    return t => (t < 1e-4 ? original : interpolator(t));
+    return t => {
+      let et = ease(t);
+      return (et < 1e-4 ? original : interpolator(t));
+    };
   }
 
   return interpolator;

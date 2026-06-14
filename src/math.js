@@ -1,5 +1,6 @@
 import { toPathString } from "./svg.js";
 import { polygonCentroid as d3Centroid } from "d3-polygon";
+import { resolveEasing } from "./easing.js";
 
 export function distance(a, b) {
   return Math.sqrt(
@@ -15,11 +16,13 @@ export function samePoint(a, b) {
   return distance(a, b) < 1e-9;
 }
 
-export function interpolatePoints(a, b, string) {
-  let interpolators = a.map((d, i) => interpolatePoint(d, b[i]));
+export function interpolatePoints(a, b, string, easing) {
+  let interpolators = a.map((d, i) => interpolatePoint(d, b[i])),
+    ease = resolveEasing(easing);
 
   return function(t) {
-    let values = interpolators.map(fn => fn(t));
+    let et = ease(t);
+    let values = interpolators.map(fn => fn(et));
     return string ? toPathString(values) : values;
   };
 }
